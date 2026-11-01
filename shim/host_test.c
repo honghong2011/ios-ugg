@@ -17,10 +17,12 @@ int main(void)
 	con_hex("ESR", 0x96000010);
 	FILE *f = fopen("out/host.ppm", "wb");
 	fprintf(f, "P6 %d %d 255\n", FB_W, FB_H);
-	for (int i = 0; i < FB_W * FB_H; i++) {
-		unsigned char px[3] = { host_fb[i] >> 16, host_fb[i] >> 8, host_fb[i] };
-		fwrite(px, 1, 3, f);
-	}
+	for (int y = 0; y < FB_H; y++)
+		for (int x = 0; x < FB_W; x++) {
+			uint32_t p = host_fb[y * (FB_STRIDE / 4) + x];
+			unsigned char px[3] = { p >> 16, p >> 8, p };
+			fwrite(px, 1, 3, f);
+		}
 	fclose(f);
 	return 0;
 }

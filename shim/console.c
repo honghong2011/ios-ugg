@@ -26,7 +26,7 @@ void con_clear(uint32_t bg)
 		con_fb = CON_FB;
 	for (int y = 0; y < FB_H; y++) {
 		volatile uint32_t *line = con_fb + y * (FB_STRIDE / 4);
-		for (int x = 0; x < FB_W; x++)
+		for (int x = 0; x < FB_STRIDE / 4; x++)
 			line[x] = bg;
 	}
 	con_bg = bg;
