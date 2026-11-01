@@ -1,0 +1,40 @@
+name: shim-ugg
+
+on:
+  push:
+    branches: [ugg-port]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio
+
+      - name: Build shim (compile validation)
+        run: |
+          cd shim
+          mkdir -p out
+          CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+          for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c; do
+            aarch64-linux-gnu-gcc $CFLAGS -c $f -o out/${f%.*}.o
+          done
+          aarch64-linux-gnu-readelf -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o | tee reloc.txt
+          abs=$(grep -c ABS64 reloc.txt || true)
+          [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
+
+      # U1 阶段接入：mkbootimg --header_version 0 打包 + artifact 上传
+      # - name: Package boot image
+      #   run: |
+      #     pip3 install mkbootimg
+      #     cd shim && ./build.sh
+      # - uses: actions/upload-artifact@v4
+      #   with:
+      #     name: shim-ugg-boot
+      #     path: shim/out/shim-boot.img
