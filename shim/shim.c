@@ -463,9 +463,48 @@ static void test_gic(void)
 	isb();
 }
 
-/* ---- main ---- */
+/* ---- display probe ---- */
 
-void shim_main(uint64_t dtb)
+/*
+ * One boot, six candidate framebuffer formats. Phase i shows background
+ * colour i and i+1 white squares at the top left, plus black edges so a
+ * wrong stride shows up as sheared vertical lines. 10 s per phase,
+ * two cycles.
+ */
+static const struct {
+	uint32_t stride, bpp, bg;
+} sweep[] = {
+	{ 2944, 32, RED },		/* A */
+	{ 2880, 32, GREEN },		/* B */
+	{ 1440, 16, BLUE },		/* C */
+	{ 1536, 16, YELLOW },		/* D */
+	{ 2160, 24, 0xffff00ff },	/* E magenta */
+	{ 2944, 32, WHITE },		/* F */
+};
+
+static void display_sweep(void)
+{
+	for (int cycle = 0; cycle < 2; cycle++) {
+		for (unsigned i = 0; i < sizeof(sweep) / sizeof(sweep[0]); i++) {
+			char id[2] = { (char)('A' + i), 0 };
+
+			con_setup((volatile void *)FB_BASE, sweep[i].stride,
+				  sweep[i].bpp);
+			con_clear(sweep[i].bg);
+			con_str("PHASE", id);
+			for (unsigned b = 0; b <= i; b++)
+				con_rect(40 + (int)b * 110, 120, 90, 60, WHITE);
+			con_rect(0, 0, 8, FB_H, BLACK);
+			con_rect(FB_W - 8, 0, 8, FB_H, BLACK);
+			con_rect(0, FB_H - 8, FB_W, 8, BLACK);
+			delay_ms(10000);
+		}
+	}
+}
+
+/* ---- U1 probe ---- */
+
+static void __attribute__((unused)) u1_probe(uint64_t dtb)
 {
 	struct mmu_info mi;
 
@@ -541,4 +580,18 @@ void shim_main(uint64_t dtb)
 	con_skip();
 	con_str("DONE", "probe complete, reset in ~3 min");
 	reset(180);
+}
+
+/* ---- main ---- */
+
+void shim_main(uint64_t dtb)
+{
+	(void)dtb;
+	timer_init();
+	display_sweep();
+
+	con_setup((volatile void *)FB_BASE, FB_STRIDE, 32);
+	con_clear(BLACK);
+	con_str("SWEEP", "done: phases A-F, reset in ~2 min");
+	reset(120);
 }
