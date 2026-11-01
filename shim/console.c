@@ -5,20 +5,19 @@
 #include "console.h"
 #include "font.h"
 
-#define SCALE		3
+#define SCALE		2	/* 720 px wide: 45 columns, 40 rows */
 #define CH_W		(8 * SCALE)
 #define CH_H		(16 * SCALE)
 #define MARGIN		24
 #define LABEL_COLS	8
 
-volatile uint32_t *con_fb = (volatile uint32_t *)FB_BASE;
 static uint32_t con_bg;
 static int row;
 
 void con_clear(uint32_t bg)
 {
 	for (int y = 0; y < FB_H; y++) {
-		volatile uint32_t *line = con_fb + y * (FB_STRIDE / 4);
+		volatile uint32_t *line = CON_FB + y * (FB_STRIDE / 4);
 		for (int x = 0; x < FB_W; x++)
 			line[x] = bg;
 	}
@@ -38,7 +37,7 @@ static void put_char(int col, char ch, uint32_t fg)
 		for (int gx = 0; gx < 8; gx++) {
 			uint32_t c = (g[gy] & (0x80 >> gx)) ? fg : con_bg;
 			for (int sy = 0; sy < SCALE; sy++) {
-				volatile uint32_t *p = con_fb + (y0 + gy * SCALE + sy) * (FB_STRIDE / 4)
+				volatile uint32_t *p = CON_FB + (y0 + gy * SCALE + sy) * (FB_STRIDE / 4)
 						       + x0 + gx * SCALE;
 				for (int sx = 0; sx < SCALE; sx++)
 					p[sx] = c;
