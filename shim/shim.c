@@ -467,51 +467,33 @@ static void test_gic(void)
 /* ---- display probe ---- */
 
 /*
- * One boot, six candidate framebuffer formats. Phase i shows background
- * colour i and i+1 white squares at the top left, plus black edges so a
- * wrong stride shows up as sheared vertical lines. 10 s per phase,
- * two cycles.
+ * The sweep (commit 0ff9a01) answered its question differently than planned:
+ * no candidate was clean, because the panel format is the bootloader's splash
+ * config, not fb0's. The ios-ugglite port of the same mi8937 LK proved on
+ * hardware that this splash is 24bpp RGB888, stride 2160, RGB byte order -
+ * the exact opposite of fb0's 32bpp/2944. So the console is 24bpp now and the
+ * sweep is gone; if this screen is still garbage the next candidates are the
+ * 0x90001000 sub-base (mainline simple-fb address on ugglite) and RGB565.
  */
-static const struct {
-	uint32_t stride, bpp, bg;
-} sweep[] = {
-	{ 2944, 32, RED },		/* A */
-	{ 2880, 32, GREEN },		/* B */
-	{ 1440, 16, BLUE },		/* C */
-	{ 1536, 16, YELLOW },		/* D */
-	{ 2160, 24, 0xffff00ff },	/* E magenta */
-	{ 2944, 32, WHITE },		/* F */
-};
-
-static void display_sweep(void)
-{
-	for (int cycle = 0; cycle < 2; cycle++) {
-		for (unsigned i = 0; i < sizeof(sweep) / sizeof(sweep[0]); i++) {
-			char id[2] = { (char)('A' + i), 0 };
-
-			con_setup((volatile void *)FB_BASE, sweep[i].stride,
-				  sweep[i].bpp);
-			con_clear(sweep[i].bg);
-			con_str("PHASE", id);
-			for (unsigned b = 0; b <= i; b++)
-				con_rect(40 + (int)b * 110, 120, 90, 60, WHITE);
-			con_rect(0, 0, 8, FB_H, BLACK);
-			con_rect(FB_W - 8, 0, 8, FB_H, BLACK);
-			con_rect(0, FB_H - 8, FB_W, 8, BLACK);
-			delay_ms(10000);
-		}
-	}
-}
 
 /* ---- U1 probe ---- */
 
-static void __attribute__((unused)) u1_probe(uint64_t dtb)
+static void u1_probe(uint64_t dtb)
 {
 	struct mmu_info mi;
 
 	wr32(IMEM_LOG + 0x0c, IMEM_RUNNING);
 	mark("banner", ST_START);
 	timer_init();
+
+	/* Format confirmation before anything else: black bg + text at the
+	 * splash format. If this is readable, everything below is too. */
+	con_setup((volatile void *)FB_BASE, FB_SPLASH_STRIDE, 24);
+	con_clear(BLACK);
+	con_str("FMT", "24bpp 2160 0x90000000");
+	con_str("FMT", "readable = display OK");
+	delay_ms(8000);
+
 	con_clear(RED);
 	con_str("SHIM", "ugg U1: GICv2 / timer / SMP probe");
 	con_skip();
@@ -559,7 +541,9 @@ static void __attribute__((unused)) u1_probe(uint64_t dtb)
 	mark("mmu", ST_MMU);
 	res[R_MMU] = 0xffff;
 	if (!tg16_ok) {
-		con_str("MMU", "no 16K granule: XNU blocker");
+		/* Expected on A53: not a blocker - the ugglite port runs xnu
+		 * with 4K hw pages + PAGE_RATIO=4 (16K VM pages). */
+		con_str("MMU", "no 16K granule: PAGE_RATIO=4 path");
 	} else if (mmu_enable(&mi)) {
 		res[R_MMU] = 0xfffe;
 		con_str("MMU", "setup failed");
@@ -587,12 +571,5 @@ static void __attribute__((unused)) u1_probe(uint64_t dtb)
 
 void shim_main(uint64_t dtb)
 {
-	(void)dtb;
-	timer_init();
-	display_sweep();
-
-	con_setup((volatile void *)FB_BASE, FB_STRIDE, 32);
-	con_clear(BLACK);
-	con_str("SWEEP", "done: phases A-F, reset in ~2 min");
-	reset(120);
+	u1_probe(dtb);
 }

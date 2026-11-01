@@ -12,6 +12,16 @@
 #define FB_W		720
 #define FB_H		1280
 #define FB_STRIDE	2944
+/*
+ * What the shim draws into is the LK splash, not the kernel fb0 config above
+ * (32bpp/2944 is what TWRP userspace reconfigures the fb to). On the
+ * mi8937-family bootloader the splash is 24bpp RGB888, stride 720*3 = 2160,
+ * at the splash_region base - proven on hardware by the ios-ugglite port of
+ * the same LK. Drawing the whole frame at a slightly wrong sub-base only
+ * shifts the image by a row or two; a wrong bpp or stride shears it into
+ * "TV static". fbinfo on ugglite: red.offset 0 / green 8 / blue 16 = R,G,B.
+ */
+#define FB_SPLASH_STRIDE	(720 * 3)
 
 /* Default framebuffer; con_fb starts NULL so .data stays relocation-free. */
 #define CON_FB		((volatile uint32_t *)(uintptr_t)FB_BASE)
