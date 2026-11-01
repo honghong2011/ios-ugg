@@ -113,8 +113,6 @@ static void delay_ms(unsigned ms)
 
 static void __attribute__((noreturn)) reset(unsigned after_s)
 {
-	con_skip();
-	con_str("RESET", after_s > 20 ? "in 40s (then fastboot)" : "in 20s");
 	delay_ms(after_s * 1000);
 	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
 	__asm__ volatile("dsb sy" ::: "memory");
@@ -168,6 +166,8 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_hex("X0", regs[0]);
 	con_hex("X1", regs[1]);
 	con_hex("X30", regs[31]);	/* x29/x30 were stashed just above the frame */
+	con_skip();
+	con_str("RESET", "panic: in 40s, then fastboot");
 	reset(40);
 }
 
@@ -339,6 +339,8 @@ void shim_main(uint64_t dtb)
 	con_skip();
 	con_hex2("DTB", "at=", (uint32_t)dtb,
 		 "magic=", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
+	/* LK loads the decompressed kernel at 0x10080000, not the header addr */
+	con_hex("LOAD", (uintptr_t)shim_main);
 
 	/* xnu payload? For U1 the ramdisk is empty, so this just validates
 	 * that /chosen parses (and prints the initrd the LK passed). */
@@ -388,5 +390,7 @@ void shim_main(uint64_t dtb)
 	}
 
 	stage = "done";
-	reset(40);
+	con_skip();
+	con_str("DONE", "probe complete, reset in ~3 min");
+	reset(180);
 }
