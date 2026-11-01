@@ -93,6 +93,7 @@ static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; 
 static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 
 extern char secondary_entry[];
+void shim_main(uint64_t dtb);	/* entry point; u1_probe prints its address */
 
 enum stage_id {
 	ST_START = 1, ST_BANNER, ST_DTB, ST_LOADER, ST_CPU, ST_PSCI,
