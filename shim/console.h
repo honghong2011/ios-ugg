@@ -11,8 +11,10 @@
 #define FB_H		1280
 #define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
 
-/* A macro, not an initialised global: no ABS64 relocation in .data. */
+/* Default framebuffer; con_fb starts NULL so .data stays relocation-free. */
 #define CON_FB		((volatile uint32_t *)(uintptr_t)FB_BASE)
+
+extern volatile uint32_t *con_fb;
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U
