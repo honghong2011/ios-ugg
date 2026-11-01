@@ -42,7 +42,7 @@ if [ -n "${UGG_DTBUNDLE:-}" ]; then
 	BUNDLE_ARGS="--dtbundle $UGG_DTBUNDLE"
 fi
 python3 ../tools/pack-ugg.py --kernel out/Image --ramdisk out/ramdisk.bin \
-	$BUNDLE_ARGS --cmdline "console=null" -o out/shim-boot.img
+	$BUNDLE_ARGS --cmdline "console=null" --out out/shim-boot.img
 
 # Host render of the console layout.
 gcc -O1 -Wall -o out/host_test console.c host_test.c && ./out/host_test
