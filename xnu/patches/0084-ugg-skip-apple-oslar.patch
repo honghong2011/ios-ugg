@@ -1,0 +1,34 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 023086f..27c5460 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -126,8 +126,13 @@ LEXT(LowResetVectorBase)
+ 	.globl EXT(reset_vector)
+ LEXT(reset_vector)
+ 	// Preserve x0 for start_first_cpu, if called
+-	// Unlock the core for debugging
++	// Unlock the core for debugging.
++	// OSLAR_EL1 is an Apple-only debug register: on any other ARMv8 core
++	// this msr is UNDEFINED and traps before the first instruction of C
++	// code runs, which is why XNU produced no output at all on the A53.
++#if !defined(SWEET)
+ 	msr		OSLAR_EL1, xzr
++#endif
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+ 
+ #if !(defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR))
+@@ -506,8 +511,13 @@ start_cpu:
+ 	.globl EXT(start_first_cpu)
+ LEXT(start_first_cpu)
+ 
+-	// Unlock the core for debugging
++	// Unlock the core for debugging.
++	// OSLAR_EL1 is an Apple-only debug register: on any other ARMv8 core
++	// this msr is UNDEFINED and traps before the first instruction of C
++	// code runs, which is why XNU produced no output at all on the A53.
++#if !defined(SWEET)
+ 	msr		OSLAR_EL1, xzr
++#endif
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+ 
+ 	mov		x20, x0
