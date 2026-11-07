@@ -31,7 +31,7 @@ new file mode 100644
 + * Interfaces no kernel path uses on SWEET (they serve other Apple kexts)
 + * panic with a clear message instead of being NULL.
 + */
-+#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(SWEET_FAMILY)
 +#include <kern/debug.h>
 +#include <kern/startup.h>
 +#include <libkern/amfi/amfi.h>
@@ -189,4 +189,4 @@ new file mode 100644
 +	printf("SWEET AMFI: built-in interface registered (no entitlements)\n");
 +}
 +STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, sweet_amfi_register);
-+#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* SWEET_FAMILY */

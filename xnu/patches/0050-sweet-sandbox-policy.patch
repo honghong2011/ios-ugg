@@ -63,4 +63,4 @@
 +	printf("SWEET Sandbox: permissive policy %s (%d)\n",
 +	    error ? "NOT registered" : "registered", error);
  }
- #endif /* ARM64_BOARD_CONFIG_SWEET */
+ #endif /* SWEET_FAMILY */

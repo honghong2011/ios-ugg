@@ -41,7 +41,7 @@
 + * DWC3 / PHY register blocks only when the GCC status registers say their
 + * power domain and clocks are on (an access to a gated block would hang).
 + */
-+#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(SWEET_FAMILY)
 +#include <sys/param.h>
 +#include <sys/systm.h>
 +#include <pexpert/pexpert.h>
@@ -136,4 +136,4 @@
 +	printf("SWEET USB: QUSB2 PLL_STATUS 0x%08x PWR_CTRL1 0x%08x PORT_TUNE1 0x%08x TEST1 0x%08x\n",
 +	    usb_rd(phy, 0x1a0), usb_rd(phy, 0x210), usb_rd(phy, 0x240), usb_rd(phy, 0x254));
 +}
-+#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* SWEET_FAMILY */

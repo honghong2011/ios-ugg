@@ -4,7 +4,7 @@
  	bsd_init_kprintf("calling vfsinit\n");
  	vfsinit();
  
-+#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(SWEET_FAMILY)
 +	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
 +	extern void sweet_amfi_policy_register(void);
 +	sweet_amfi_policy_register();
@@ -280,7 +280,7 @@
 +	printf("SWEET AMFI: platform binary policy %s (%d)\n",
 +	    error ? "NOT registered" : "registered", error);
 +}
- #endif /* ARM64_BOARD_CONFIG_SWEET */
+ #endif /* SWEET_FAMILY */
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
 @@ -10,3 +10,4 @@

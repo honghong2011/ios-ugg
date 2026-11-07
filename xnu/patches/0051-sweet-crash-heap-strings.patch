@@ -110,5 +110,5 @@
 +	printf("STR done: %llu KiB scanned, %d strings\n", scanned >> 10, lines);
 +	kfree_data(buf, 65536);
  }
- #endif /* ARM64_BOARD_CONFIG_SWEET */
+ #endif /* SWEET_FAMILY */
  
