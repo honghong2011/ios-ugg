@@ -1,0 +1,324 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 2545cf9..f1d1464 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -17,6 +17,7 @@
+ #include <kern/thread.h>
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm/protos.h>
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+@@ -220,6 +221,26 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	if (aff0 >= 16) {
+ 		panic("SWEET CPU: SGI target requires unsupported range selector");
+ 	}
++#if defined(UGG_GIC_V2)
++	/*
++	 * GICv2 has no ICC_SGI1R_EL1: an SGI is raised by writing the
++	 * distributor's GICD_SGIR (0xf00):
++	 *   [25:24] target list filter, 0b00 = use the target list below
++	 *   [23:16] INTID
++	 *   [15:0]  target list, one bit per CPU interface
++	 * MSM8937 wires the eight CPU interfaces in DT order across both
++	 * MPIDR clusters, so the target bit is the logical cpu number, not
++	 * aff0 (aff0 repeats 0-3 in each cluster). pe_init_fiq() already
++	 * mapped the distributor, so this reuses that window.
++	 */
++	if (logical >= 16) {
++		panic("SWEET CPU: GICv2 SGI target list overflow cpu=%u", logical);
++	}
++	uint32_t sgir = ((uint32_t)SWEET_IPI_SGI << 16) | (1U << logical);
++	__builtin_arm_dsb(DSB_ISHST);
++	sweet_gic_send_sgi(sgir);
++	__builtin_arm_isb(ISB_SY);
++#else
+ 	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
+ 	    (((mpidr >> 16) & 0xff) << 32) |
+ 	    (((mpidr >> 8) & 0xff) << 16) |
+@@ -227,6 +248,7 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	__builtin_arm_dsb(DSB_ISHST);
+ 	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
+ 	__builtin_arm_isb(ISB_SY);
++#endif
+ }
+ 
+ kern_return_t
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..e3b76a7 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1858,10 +1858,14 @@ sleh_irq(arm_saved_state_t *state)
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
+-	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
++	 * TrustZone owns GIC Group 0, so the timer and IPIs that other ARM64
++	 * targets take as FIQs arrive here as Group 1 IRQs.
++	 *
++	 * Acknowledge and end-of-interrupt go through the board's accessors:
++	 * GICv3 uses the ICC_* system registers, GICv2 reads the CPU
++	 * interface's IAR and writes EOIR (see pexpert/arm/pe_fiq.c).
+ 	 */
+-	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
++	uint64_t iar = sweet_gic_ack();
+ 	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+@@ -1873,11 +1877,11 @@ sleh_irq(arm_saved_state_t *state)
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 	} else if (intid < 16) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 		__builtin_arm_isb(ISB_SY);
+ 		cpu_signal_handler();
+ 	} else {
+@@ -1888,7 +1892,7 @@ sleh_irq(arm_saved_state_t *state)
+ 			    cdp->interrupt_nub,
+ 			    intid);
+ 		}
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 	}
+ 	__builtin_arm_isb(ISB_SY);
+ #else
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..8624adb 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -13,15 +13,19 @@
+ #include <pexpert/arm64/board_config.h>
+ 
+ 
+-#if HAS_GIC_V3
+-#define GICR_WAKE_TIMEOUT_NS (1000000000ULL) // timeout for redistributor wakeup (default 1s)
+-MACHINE_TIMEOUT(gicr_wake_timeout_ns, "gicr-wake-timeout", GICR_WAKE_TIMEOUT_NS, MACHINE_TIMEOUT_UNIT_NSEC, NULL);
+-
+ #if defined(SWEET)
+-/* Phone default; QEMU virt wires the architected virtual timer to INTID 27. */
++/*
++ * The virtual timer's PPI number is per-SoC (sweet 19, ugg 20), so it is a
++ * variable, overridable from the device tree's "virtual-timer-intid". It
++ * lives outside the HAS_GIC_V3 block because the GICv2 path needs it too.
++ */
+ SECURITY_READ_ONLY_LATE(uint32_t) sweet_vtimer_intid = SWEET_VTIMER_INTID;
+ #endif
+ 
++#if HAS_GIC_V3
++#define GICR_WAKE_TIMEOUT_NS (1000000000ULL) // timeout for redistributor wakeup (default 1s)
++MACHINE_TIMEOUT(gicr_wake_timeout_ns, "gicr-wake-timeout", GICR_WAKE_TIMEOUT_NS, MACHINE_TIMEOUT_UNIT_NSEC, NULL);
++
+ static vm_offset_t gicd_base;
+ static vm_offset_t gicr_base;
+ static vm_offset_t gicr_size;
+@@ -50,6 +54,22 @@ _gic_write32(vm_offset_t addr, uint32_t value)
+ #define gicr_write32(offset, data) (_gic_write32(gicr_pe_base + (offset), (data)))
+ #define gicr_read64(offset) (_gic_read64(gicr_pe_base + (offset)))
+ 
++/*
++ * Acknowledge / end-of-interrupt, shared by the IRQ entry path in sleh.c.
++ * GICv3 takes these through system registers; GICv2 (below) uses MMIO.
++ */
++uint64_t
++sweet_gic_ack(void)
++{
++	return __builtin_arm_rsr64("ICC_IAR1_EL1");
++}
++
++void
++sweet_gic_eoi(uint64_t iar)
++{
++	__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++}
++
+ static vm_offset_t
+ find_gicr_pe_base()
+ {
+@@ -222,6 +242,159 @@ pe_init_fiq()
+ 	__builtin_arm_isb(ISB_SY);
+ #endif /* SWEET */
+ }
++#elif defined(UGG_GIC_V2)
++/*
++ * GICv2 for Qualcomm SoCs without redistributors (MSM8937/MSM8940,
++ * "qcom,msm-qgic2"): two MMIO frames, the distributor and one per-core CPU
++ * interface. There is no ICC_* system register for the acknowledge path -
++ * only the Group 1 enable stays a system register.
++ *
++ * Like the GICv3 SWEET path: Qualcomm's GIC has two security states and
++ * TrustZone owns Group 0, so everything this kernel owns is Group 1 and
++ * arrives as an IRQ through sleh_irq().
++ */
++
++static vm_offset_t gicd_base;
++static vm_offset_t gicc_base;
++
++static uint32_t
++_gic2_read32(vm_offset_t addr)
++{
++	return *((volatile uint32_t *) addr);
++}
++
++static void
++_gic2_write32(vm_offset_t addr, uint32_t value)
++{
++	*((volatile uint32_t *) addr) = value;
++}
++
++#define gicd2_read32(offset) (_gic2_read32(gicd_base + (offset)))
++#define gicd2_write32(offset, data) (_gic2_write32(gicd_base + (offset), (data)))
++#define gicc2_read32(offset) (_gic2_read32(gicc_base + (offset)))
++#define gicc2_write32(offset, data) (_gic2_write32(gicc_base + (offset), (data)))
++
++/* GICv2: acknowledge from the CPU interface's IAR, complete through EOIR. */
++uint64_t
++sweet_gic_ack(void)
++{
++	return gicc2_read32(GICC_IAR);
++}
++
++void
++sweet_gic_eoi(uint64_t iar)
++{
++	gicc2_write32(GICC_EOIR, (uint32_t)iar);
++}
++
++/*
++ * GICv2 SGI: write the distributor's GICD_SGIR. The caller supplies the
++ * encoded value (INTID in [23:16], target list in [15:0]).
++ */
++void
++sweet_gic_send_sgi(uint32_t sgir)
++{
++	gicd2_write32(GICD_SGIR, sgir);
++}
++
++void
++pe_init_fiq()
++{
++	int error;
++	DTEntry entry;
++	void const *prop;
++	unsigned int prop_size;
++
++	/*
++	 * gicd_base is 0 only before the boot CPU has initialised it. Secondary
++	 * CPUs must not call the SecureDT routines (they are not thread-safe).
++	 */
++	if (!gicd_base) {
++		error = SecureDTLookupEntry(NULL, "/arm-io/gic", &entry);
++		if (error != kSuccess) {
++			panic("%s: cannot find GIC node in DT", __func__);
++		}
++
++		error = SecureDTGetProperty(entry, "reg", &prop, &prop_size);
++		if (error != kSuccess) {
++			panic("%s: cannot find GIC MMIO regions in DT", __func__);
++		}
++		/* GICD base/size then GICC base/size: four 8-byte cells. */
++		if (prop_size < 4 * sizeof(uint64_t)) {
++			panic("%s: GIC reg has %u bytes, expected at least 32", __func__, prop_size);
++		}
++
++		/* Same per-SoC timer override as the GICv3 path. */
++		void const *timer_prop;
++		unsigned int timer_size;
++		if (SecureDTGetProperty(entry, "virtual-timer-intid", &timer_prop, &timer_size) == kSuccess) {
++			if (timer_size != sizeof(uint32_t)) {
++				panic("%s: invalid virtual-timer-intid size %u", __func__, timer_size);
++			}
++			uint32_t intid = *(const uint32_t *)timer_prop;
++			if (intid < 16 || intid >= 32) {
++				panic("%s: virtual timer INTID %u is not a PPI", __func__, intid);
++			}
++			sweet_vtimer_intid = intid;
++		}
++		kprintf("SWEET GIC: v2 virtual timer INTID %u\n", sweet_vtimer_intid);
++
++		vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
++		uint64_t const gicd_base_prop = ((uint64_t const *) prop)[0];
++		uint64_t const gicd_size_prop = ((uint64_t const *) prop)[1];
++		uint64_t const gicc_base_prop = ((uint64_t const *) prop)[2];
++		uint64_t const gicc_size_prop = ((uint64_t const *) prop)[3];
++
++		gicd_base = ml_io_map(soc_base_phys + gicd_base_prop, gicd_size_prop);
++		if (!gicd_base) {
++			panic("%s: cannot map GICD region", __func__);
++		}
++		gicc_base = ml_io_map(soc_base_phys + gicc_base_prop, gicc_size_prop);
++		if (!gicc_base) {
++			panic("%s: cannot map GICC region", __func__);
++		}
++
++		kprintf("SWEET GIC: v2 distributor %p cpu-interface %p\n",
++		    (void *)gicd_base, (void *)gicc_base);
++	}
++
++	/* Forward Group 1 to the CPU interfaces and wait for the write to land. */
++	gicd2_write32(GICD_CTLR, gicd2_read32(GICD_CTLR) | GICD_CTLR_ENABLE);
++	while (gicd2_read32(GICD_CTLR) & GICD_CTLR_RWP) {
++		;
++	}
++
++	/*
++	 * SGI/PPI registers (INTID 0-31) are banked per CPU in GICv2: every
++	 * core configures its own view. Only the CTLR update above is global.
++	 */
++	/* All SGIs/PPIs we own are Group 1 (non-secure; TZ owns Group 0). */
++	for (unsigned int i = 0; i < 32; i += 4) {
++		gicd2_write32(GICD_IGROUPR + i, 0xffffffff);
++	}
++
++	/* Priority 0xa0 everywhere, so PMR 0xff admits everything. */
++	for (unsigned int i = 0; i < 32; i += 4) {
++		gicd2_write32(GICD_IPRIORITYR + i, 0xa0a0a0a0);
++	}
++
++	/* The virtual timer PPI is level-sensitive: ICFGR bit pair 0. */
++	gicd2_write32(GICD_ICFGR + 4, 0);
++
++	gicd2_write32(GICD_ISENABLER, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++
++	/* CPU interface: admit all priorities, no binary point, enable. */
++	gicc2_write32(GICC_PMR, 0xff);
++	gicc2_write32(GICC_BPR, 0);
++	gicc2_write32(GICC_CTLR, 1);
++
++	/* Group 1 enable is still a system register, even on GICv2. */
++	uint64_t icc_sre = __builtin_arm_rsr64("ICC_SRE_EL1");
++	__builtin_arm_wsr64("ICC_SRE_EL1", icc_sre | ICC_SRE_SRE);
++	__builtin_arm_isb(ISB_SY);
++	__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
++	__builtin_arm_isb(ISB_SY);
++}
+ #else
+ void
+ pe_init_fiq()
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+index 09ef18f..f45dbc4 100644
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -38,6 +38,15 @@ int uart_getc(void);
+ void pe_init_fiq(void);
+ #if defined(SWEET_FAMILY)
+ extern uint32_t sweet_vtimer_intid;
++/* GIC acknowledge / end-of-interrupt; GICv3 uses the ICC_* system registers,
++ * GICv2 reads/writes the CPU interface MMIO frame. Implemented in
++ * pexpert/arm/pe_fiq.c. sleh_irq() calls these on both boards. */
++uint64_t sweet_gic_ack(void);
++void sweet_gic_eoi(uint64_t iar);
++#if defined(UGG_GIC_V2)
++/* GICv2 SGI: raises an interrupt by writing GICD_SGIR (encoded value). */
++void sweet_gic_send_sgi(uint32_t sgir);
++#endif
+ #endif
+ 
+ #ifdef PRIVATE
