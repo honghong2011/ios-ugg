@@ -1,0 +1,140 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -87,6 +87,18 @@
+ 		early_col = 0;
+ 		return;
+ 	}
++	if (c == '\t') {
++		/*
++		 * The panic register dump tabs its field columns. Without this the
++		 * byte would be drawn as an iso_font glyph and shift every following
++		 * field, which is why the first on-hardware panic dump came out
++		 * misaligned (a leading tab must move to the next 4-column stop).
++		 */
++		do {
++			sweet_early_putc(' ');
++		} while (early_col & 3u);
++		return;
++	}
+ 	if (c == '\n' || early_col == EARLY_COLS) {
+ 		early_col = 0;
+ 		early_row = (early_row + 1) % EARLY_ROWS;
+@@ -147,6 +159,40 @@
+ 	sweet_early_putc('\n');
+ }
+ 
++static void
++sweet_early_vprint(const char *fmt, ...)
++{
++	va_list ap;
++	va_start(ap, fmt);
++	_doprnt(fmt, &ap, sweet_early_putc, 16);
++	va_end(ap);
++}
++
++/*
++ * Dump the faulting context of a synchronous exception.
++ *
++ * Called from the SLEH before it touches any per-thread state. During early
++ * boot (arm_vm_init/pmap_bootstrap) no thread owns the stack, so the handler's
++ * own prologue can fault while dereferencing current_thread(); what reaches
++ * panic() then is the misleading "Invalid kernel stack pointer", and the real
++ * fault is lost. Printing the pc/esr/far here names it.
++ */
++void
++sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
++    uint32_t esr, uint64_t far)
++{
++	if (early_disabled) {
++		return;
++	}
++	sweet_early_string("\nSWEET FAULT ");
++	sweet_early_string(tag);
++	sweet_early_vprint("\n pc %016llx  lr %016llx"
++	    "\n sp %016llx  esr %08x  far %016llx\n",
++	    (unsigned long long)pc, (unsigned long long)lr,
++	    (unsigned long long)sp, (unsigned int)esr, (unsigned long long)far);
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ void
+ sweet_early_panic(const char *fmt, va_list *args)
+ {
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -9,6 +9,8 @@
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
++void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
++    uint32_t esr, uint64_t far);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+@@ -18,6 +20,16 @@
+ 	(void)stage;
+ 	(void)label;
+ }
++static inline void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr,
++    uint64_t sp, uint32_t esr, uint64_t far)
++{
++	(void)tag;
++	(void)pc;
++	(void)lr;
++	(void)sp;
++	(void)esr;
++	(void)far;
++}
+ static inline void sweet_early_disable(void) {}
+ #endif
+ 
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -38,6 +38,7 @@
+ #include <arm64/machine_machdep.h>
+ #include <arm64/monotonic.h>
+ #include <arm64/instructions.h>
++#include <arm64/sweet_early.h>
+ 
+ #include <kern/debug.h>
+ #include <kern/restartable.h>
+@@ -613,6 +614,19 @@
+ 	uintptr_t saved_expected_fault_addr = 0;
+ #endif /* CONFIG_XNUPOST */
+ 
++#if defined(SWEET)
++	/*
++	 * During early boot (arm_vm_init -> pmap_bootstrap) the stack belongs to no
++	 * thread, so this handler's own prologue - task_vtimer_check ->
++	 * current_thread -> get_threadtask_early - can fault before anything is
++	 * reported, and the panic that follows misnames the real fault as an
++	 * invalid kernel stack. Report the first fault here, where only the
++	 * exception frame is needed.
++	 */
++	sweet_early_fault("sync", get_saved_state_pc(state), get_saved_state_lr(state),
++	    get_saved_state_sp(state), esr, far);
++#endif /* SWEET */
++
+ 	ASSERT_CONTEXT_SANITY(context);
+ 
+ 	task_vtimer_check(thread);
+@@ -2125,6 +2139,16 @@
+ 	thread_t thread = current_thread();
+ 	vm_offset_t kernel_stack_bottom, sp;
+ 
++#if defined(SWEET)
++	/*
++	 * The stack this exception was taken on is not a thread stack, so the
++	 * panic below is a guess. Report what the hardware actually raised.
++	 */
++	sweet_early_fault("badstack", get_saved_state_pc(&context->ss),
++	    get_saved_state_lr(&context->ss), get_saved_state_sp(&context->ss),
++	    esr, far);
++#endif /* SWEET */
++
+ 	sp = get_saved_state_sp(&context->ss);
+ 	kernel_stack_bottom = round_page(thread->machine.kstackptr) - KERNEL_STACK_SIZE;
+ 

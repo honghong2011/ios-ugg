@@ -317,3 +317,47 @@ ugg 是双簇 Aff0=0-3；且它要求 boot phys_id==0，而 ugg boot 核是 0x10
 **对 U1 的改动**：console 固定 24bpp/2160@0x90000000（先一张黑底确认屏 8s，再进 U1 探测，
 屏上保留 3 分钟），`shim_main` 直接调 `u1_probe`，删除 sweep。
 
+
+## 8. M1 真机结果（2026-11-08）：屏通，内核卡在 pmap_bootstrap
+
+**实机 `fastboot boot shim-boot-m1.img`（7,984 KB，Sending/Booting 均 OKAY，非破坏性）。**
+
+- **成功**：shim 的 framebuffer 控制台起来了，屏上出现 `SWEET EARLY 9/10/11/12` 和底部彩色
+  标记条 —— 显示链路和早期控制台**完全打通**。这比 uglite 公开的真机结果（只到 stage 7
+  entering arm_vm_init）更靠前。
+- **卡点**：标记 12 之后的 13（pmap_bootstrap done）不再出现，随后 panic
+  `Invalid kernel stack pointer (probable corruption)`。寄存器 `pc` 落在
+  `_get_threadtask_early`、`lr` 落在 `_sleh_synchronous+0xbc`、`esr=0x9600004f`
+  （EL1 data abort），说明**真正的第一条异常发生在 pmap_bootstrap 内**，而异常处理函数
+  自己的 prologue（task_vtimer_check -> current_thread -> get_threadtask_early）在早期
+  启动栈上又踩了一脚，把病因掩盖成了误导性的「栈指针非法」。
+- **本轮未触发的老坑**：GICv2 / OSLAR / LSE / 48 位 VA 全部走过；SweetCPU 的拓扑校验也
+  没炸（boot 核 MPIDR 0x100 未触发 phys_id 检查 —— 条件是否编译进去待查）。
+- **符号化工具**：本轮新增 `tools/symlook.py`（解析 Mach-O 符号表，把 panic 里的
+  pc/lr 还原成函数名）。实测 pc=0xfffffe00073475c0 -> _get_threadtask_early、
+  lr=0xfffffe000743dc5c -> _sleh_synchronous+0xbc。
+
+### 0089 诊断补丁（xnu/patches/0089-ugg-early-fault-report.patch）
+
+目的：在**第一条**同步异常进入 SLEH 时就把它打出来，不再被后续误报掩盖。
+
+1. osfmk/arm64/sweet_early.c/.h：新增 `sweet_early_fault(tag, pc, lr, sp, esr, far)`，
+   经 _doprnt 直接画到早期 framebuffer 控制台；并让 `sweet_early_putc` 处理 `\t`
+   （panic 的寄存器 dump 用 tab 对齐，之前 tab 被当字形画出来，整行错位 —— 这正是首张
+   实机 panic 照片看起来乱序的原因）。
+2. osfmk/arm64/sleh.c：`sleh_synchronous` 在 task_vtimer_check **之前**调用上报器；
+   `sleh_invalid_stack` 在 panic 之前也调用（tag 分别是 sync / badstack）。两个入口都
+   只依赖异常帧，不需要线程状态。
+
+补丁已用 `patch -p1 --dry-run` 和 `git apply --check` 验证，可在 0001-0088 之后的树上
+干净应用。下一轮：CI 出内核 -> 本地 mkuggboot.py 重拼 -> 用户刷机拍屏，读屏上
+`SWEET FAULT sync ... pc ... esr ... far ...` 即可把真实故障定位到 pmap_bootstrap 的具体行。
+
+### M2 路线结论
+
+- **纯 RAM（rd=md0）**：补丁链里 0021/0022/0024 的 mockfs/RAMDisk 根已具备，
+  mkpayload.py --ramdisk 也已移植，**不需要新内核代码**；限制是 4GB RAM 装不下 4.7GB 的
+  完整 iOS rootfs，只能跑裁剪版（够把 launchd/dyld 拉起来）。
+- **eMMC（sdhci@7824900）**：全新驱动（SDHCI core + ADMA2 + GCC 时钟 + pinctrl/regulator），
+  树里无同类可抄（sweet 只有 UFS），难度高一个量级；好处是能放完整 rootfs。
+- **决定：M2 先走 RAM**，eMMC 留到需要完整系统时再做。
