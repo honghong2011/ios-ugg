@@ -2,7 +2,69 @@
 
 > 本文件镜像上游 NOTES.md 的 handoff 规范：每次里程碑后更新最新 handoff，区分事实与猜测。
 
-## Agent handoff / active work (2026-11-01, latest)
+## Agent handoff / active work (2026-11-07, latest)
+
+### >>> U1 已在真机通过（700bfa6 镜像，用户实拍红屏报告）<<<
+
+**读这里：U1 验收项全部通过，屏幕驱动正常，下一步 = U2（XNU 板级 + GICv2 驱动 + 跳转）。**
+逐行读数（对照 shim.c 打印代码）：
+
+| 屏上值 | 解读 |
+|---|---|
+| `DTB at=0x134000000 magic=0xd00dfeed` | **LK 把选中的 DTB 放 x0 传给内核入口——确认**。风险清单里那条"未验证"关闭。注意 DTB 在 0x134000000（bank2 高段），不在 bank1 |
+| `LOAD 0x10081C10` | 解压加载 0x10080000（+页对齐偏移），与 TWRP /proc/iomem 观测一致 |
+| `INITRD lo=0x13600000 hi=0x13600062` | **ugg 的 LK 会传 ramdisk 并写 chosen/linux,initrd-***（98 字节空 cpio）——与 ugglite 的 LK 行为不同。payload 仍用"追加进 Image"方案（fastboot boot 路径下不可依赖），但这条给了第二条可选通道 |
+| `LOADER no SWEETXNU payload` | 预期内（还没放 XNU 载荷） |
+| `CPU midr=0x410FD034` | Cortex-A53 r0p4 ×8；`mmfr0=0x1122`：**TGran16=0**（4K/64K only），64K=1、4K=1、PA=40bit（parange=2）。PAGE_RATIO(16K VM/4K hw) 路线确认 |
+| `TIME frq=0x124F800 ok≠0` | 19.2MHz；**CNTCR.EN 修复生效**，CNTPCT 正常前进 |
+| `PSCI ver=0x10000` | PSCI 0.1?——**读数注意**：值 = 0x00010000 = 主 0 次 1？打印把 (maj<<16\|min) 编码，实际是 **PSCI 1.0**（maj=0,min=1? 待复核；smccc 被屏幕黑斑遮挡。不影响 SMP 实测通过） |
+| `GICD iidr=0x1070 typer=0x4EA` | ARM 0x43b GIC-400；ITLinesNumber=0x1A → **11 组 = 352 INTID**；LSPI=0（无 LPI，纯 GICv2） |
+| `GICC iidr=0x20070 ctlr=1` | LK 已开 GICC（EnableGrp1=1） |
+| `GICDCTL was=1 now=1` / `GICCCTL was=1 now=1` | NS 侧 Group1 使能成功（TZ 占 Group0，符合预期） |
+| `IGROUP ppi=0 sgi=0` | 我们测的 SGI/PPI 全在 Group0（TZ 的），NS 视图下走 qgic2 的 Group1 使能路径即可投递 |
+| `ISET was=0xFF now=0x1800FF` | INTID 19/20 使能成功 |
+| `VTIMER n=30 other=0 last=0x14` | **CNTV = INTID 20 = 0x14，300ms 内 30 次中断**——核心验收通过 |
+| `pre pend=0xA1500000 hppi=0xF0` | 采样窗口内 pending 含 19/20/28/31；hppi=240（spurious 界内）正常 |
+| `PTIMER n=30 last=0x13` | CNTP = INTID 19 也通 |
+| `SGI1 n=11 other=0` | SGI 自发自收 11/11 |
+| `SMP0 on=0xF rc=0` | 核 0–3 CPU_ON 全 rc=0 全上线 |
+| `SMP1 on=0xE rc=1` | 核 5–7 上线；rc 字节 1 = boot CPU 在索引 4（0x100）故 `on` 位 4 缺。**8 核全部上线**（boot 核 + 7 从核）。注意 boot CPU 落在簇 1（0x100），XNU 侧不能假设 boot 核是 CPU 0 |
+
+**红底 = shim 完成态底色（con_clear 红色），不是 panic**。屏右上/中部的黑斑是屏幕物理坏点，不是渲染问题。
+
+**U1 遗留（不阻塞 U2）**：PSCI 版本读数需复核打印编码；`INITRD` 通道留作后备。
+
+### U2 补丁系列（2026-11-07，进行中）
+
+xnu 侧开始做 UGG 板级。所有新补丁都在本地 xnu-8796.141.3 树上逐条验证「从干净源码应用
+0001..N 全部补丁」，再 `git add -f` 进 `xnu/patches/`（`.gitignore` 忽略 `*.patch`，
+必须 `-f`）。工作树副本在 `E:\ios-ugg\xnu-src`（**不入 git**，本地验证用）。
+
+| 补丁 | 内容 | 状态 |
+|---|---|---|
+| （Phase A） | 81 个旧补丁的 `ARM64_BOARD_CONFIG_SWEET` 守卫 → 家族宏 `SWEET_FAMILY`（自动生成的 `tools/family-rename.py`，可重复执行）；0004 的 arm64e 导出闸门改为 `ifeq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET UGG),)`；builtin pthread/bearssl/hfs 的 `Makefile.template` 闸门与 3 个 `stage-*.sh` 放行 `UGG` | ✅ `0e4e765` |
+| 0082 | `UGG.h`（4K 粒度、GICv2、CNTV INTID 20、8×A53、`SWEET_SMP_MAX_CPUS 8`）、`board_config.h` 家族宏 + UGG 段、`MakeInc.def` 注册 `UGG` 与 `-mcpu=cortex-a53`（A53 无 LSE，`-march=armv8-a` 不够）、`config/MASTER.arm64.ugg`（**缺它 doconf 会静默丢掉 `nos_arm_asm`**，全内核汇编不编译 → 几百个未定义符号）、4K commpage 断言改用 iPhoneOS 的 `0x0fc0000000`、`commpage_asm.s` 两处 `casa` → LL/SC | ✅ `d813cf3` |
+| 0083 | GICv2 驱动：从 DT `/arm-io/gic` 映射 GICD/GICC，ack/EOI 走 CPU 接口 MMIO，SGI 走 `GICD_SGIR`（**目标位用逻辑 CPU 号**：8937 的 8 个 CPU 接口按 DT 顺序而非 MPIDR）；`sweet_vtimer_intid` 移出 `HAS_GIC_V3` 块；`sleh_irq` 两块板共用访问器；宏名统一 `UGG_GIC_V2`（修掉 ugglite 0083 的 `SWEET_GIC_V2` 残留） | ✅ `d813cf3` |
+| 0084 | `start.s` 两处 `msr OSLAR_EL1` 加 `#if !defined(SWEET)`（Apple 专属寄存器，A53 上 UNDEFINED → 第一条指令同步异常，即「JUMP 后黑屏」元凶） | ✅ `eb6f4ba` |
+| 0085 | 早期控制台 24bpp：新增 `osfmk/arm64/ugg_early_board.h`（板级几何），`sweet_early.c`/`pe_serial.c` fbcon 改按字节寻址 + 每像素字节数（32 位写覆盖相邻像素 = 花屏雪花）；**顺带修一个真 bug**：marker 原来按 `stage*48` 铺开，720 宽屏上 stage>14 全跑到屏外（arm_init 用到 20），改成 17px 竖条、最多 40 段 | ✅ `0f85b1d` |
+| 0086 | `start.s` 24bpp marker 阶梯 + 帧缓冲 V=P 映射（地址/步长换成 UGG 的 0x90000000/2160） | ⏳ 下一步 |
+| 0087 | 4K 页几何（最重）：`T0SZ=16`（48 位 VA）、L0 根页表、`init_ptpages` 补分配 L2、`arm_vm_init` 全部走表代码改走 L0 | ⏳ |
+
+**验证状态（2026-11-07）**：从干净 `xnu-8796.141.3` 一次性应用 **0001–0085 共 83 个补丁 = 83/83 干净通过**
+（0031/0041 两个 hfs 补丁依赖 CI 上 `0026-stage-hfs.sh` 摆放的 `bsd/sweet_hfs`，本地先手动摆好）。
+
+**关键决策：必须 4K 硬件粒度**。A53 实测 `ID_AA64MMFR0_EL1=0x1122`（TGran16 字段 = 0，不支持 16K 粒度），
+而 iOS 16 用户态是 16K 页。xnu 的 `PAGE_RATIO` 机制（4K 硬件页 + `PAGE_SHIFT_CONST=14` → PAGE_RATIO=4）
+给用户态 16K VM 页，这正是 A7/A8 的排布，也是 ugglite 走通的路。`proc_reg.h` 里 4K + `SUBPAGE_L1` 的
+`T0SZ_BOOT=26`，但 start.s 的 L0 索引宏按 9 位（bits 47:39）建表，26 只有 38 位 VA → 索引对不上；
+ugglite 的解法是 `T0SZ=T1SZ=16`，我们用同一结论。**注意 CI 构建用 `MACHINE_CONFIG=UGG` 默认值。**
+
+**参照项目最新状态**（2026-11-07 复查）：ios-sweet 上游 `45263be`（无新提交）、
+ios-ugglite `48d7f9b`（patch 0091「在 L0 根下分配 L2 层」，仍未公开真机结果）。两边都没有新东西可抄。
+
+### >>> 以下为 2026-11-01 的历史 handoff <<<
+
+## Agent handoff / active work (2026-11-01)
 
 ### 已完成
 - 实机只读探测完成（adb / fastboot / TWRP）：硬件事实全部固化在
