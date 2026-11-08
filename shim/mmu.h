@@ -1,7 +1,6 @@
 #pragma once
 #include <stdint.h>
-
-#define FB_PHYS	0x90000000UL
+#include "board.h"
 
 struct mmu_info {
 	uint64_t img_lo, img_hi, ttbr;
@@ -10,4 +9,6 @@ struct mmu_info {
 };
 
 int mmu_enable(struct mmu_info *info);
+int mmu_enable_range(struct mmu_info *info, uintptr_t ram_lo, uintptr_t ram_hi);
+int mmu_map_alias(uintptr_t va, uintptr_t pa, uint64_t size);
 uint64_t mmu_probe(uintptr_t va);

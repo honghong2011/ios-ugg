@@ -1,9 +1,15 @@
 name: shim-ugg
 
+# Builds the ugg boot shim (BOARD_UGG) to shim/out/Image. Needs a cross
+# compiler, so it runs here; the final boot image (payload appended, gzip, DTB
+# bundle) is assembled locally by tools/, where the device DTB bundle lives
+# (device dumps are never committed).
 on:
   push:
     branches: [ugg-port]
-  pull_request:
+    paths:
+      - 'shim/**'
+      - '.github/workflows/shim-ugg.yml'
   workflow_dispatch:
 
 jobs:
@@ -17,7 +23,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio
 
-      - name: Build shim + boot image
+      - name: Build shim
         run: |
           set -o pipefail
           ./shim/build.sh 2>&1 | tee build.log
@@ -29,26 +35,32 @@ jobs:
           name: build-log
           path: build.log
 
-      - name: Check boot image layout
+      - name: Check shim Image
         run: |
           python3 - <<'PY'
           import struct
-          d = open('shim/out/shim-boot.img', 'rb').read()
-          assert d[:8] == b'ANDROID!', 'boot magic'
-          ks, ka, rs, ra, ss, sa, ta, ps = struct.unpack_from('<8I', d, 8)
-          hv = struct.unpack_from('<I', d, 40)[0]
-          assert hv == 0 and ps == 2048, 'header v0 / 2048-byte pages'
-          assert (ka, ra, ta) == (0x80008000, 0x81000000, 0x80000100), hex((ka, ra, ta))
-          kend = ps + (ks + ps - 1) // ps * ps
-          assert d[kend:kend + 2] == b'\x1f\x8b', 'ramdisk gzip magic'
-          assert len(d) == kend + (rs + ps - 1) // ps * ps, 'image length'
-          print('boot image OK: kernel %#x ramdisk %#x page %d' % (ks, rs, ps))
+          d = open('shim/out/Image', 'rb').read()
+          assert d[56:60] == b'ARM\x64', 'arm64 Image magic missing'
+          isz = struct.unpack_from('<Q', d, 8)[0]
+          assert 0 < isz <= len(d), 'image_size %#x vs file %#x' % (isz, len(d))
+          print('shim Image OK: %d bytes, image_size 0x%x' % (len(d), isz))
+          PY
+
+      - name: Report shim as annotation
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, hashlib
+          p = 'shim/out/Image'
+          if os.path.exists(p):
+              d = open(p, 'rb').read()
+              print('::notice title=shim-image::%d bytes sha256=%s'
+                    % (len(d), hashlib.sha256(d).hexdigest()))
+          else:
+              print('::error title=shim-missing::no shim/out/Image')
           PY
 
       - uses: actions/upload-artifact@v4
         with:
           name: shim-ugg
-          path: |
-            shim/out/Image
-            shim/out/ramdisk.bin
-            shim/out/shim-boot.img
+          path: shim/out/Image

@@ -1,0 +1,185 @@
+#pragma once
+/*
+ * Per-board physical constants for the shim.
+ *
+ * Select at build time with -DBOARD_UGGLITE (default: sweet, the Redmi Note
+ * 10 Pro / SM7150). Everything the shim touches before it loads a payload is
+ * here: the ABL splash framebuffer, the interrupt controller and the two
+ * Qualcomm restart registers.
+ *
+ * Sources for the ugglite values: the mainline device tree
+ * (msm8917-xiaomi-ugglite.dts in the postmarketOS tree) and the stock MIUI
+ * DTB #07 ("MSM8917-PMI8937 MTP", board-id <8 0>), which agree.
+ */
+
+#if defined(BOARD_QEMU)
+
+/*
+ * QEMU virt: a stand-in for an unknown board. It exists so the probe and the
+ * loader can be exercised end to end on the host before a phone boot. The
+ * memory layout is QEMU's (RAM at 0x40000000, GICv2 at 0x08000000) and the
+ * framebuffer is wherever the harness places it, which the runner passes in
+ * with -DFB_PHYS=... (default matches tools/qemu-sweet.py).
+ *
+ * GICv2 on purpose: the same driver path as ugglite.
+ */
+#define BOARD_NAME	"qemu-virt"
+#define BOARD_HAS_PROBE	1
+
+#ifndef FB_PHYS
+#define FB_PHYS		0x60000000UL
+#endif
+#define FB_PHYS_ALT	FB_PHYS
+#define FB_W		720
+#define FB_H		1280
+#define FB_BPP		4		/* the runner fills 32 bpp */
+#define FB_SCALE	2
+
+#define GICD_BASE	0x08000000UL
+#define GICC_BASE	0x08010000UL
+#define GIC_IS_V2	1
+
+/* No Qualcomm restart registers; reset() falls through to PSCI, which QEMU has. */
+#define PSHOLD_PHYS		0x0UL
+#define IMEM_RESTART_REASON	0x0UL
+#define IMEM_BASE		0x0UL
+
+#define TLMM_BASE	0x0UL
+
+#define VTIMER_INTID	27		/* QEMU virt wires the virt timer to PPI 11 */
+#define PTIMER_INTID	30
+#define SGI_INTID	1
+
+#elif defined(BOARD_UGG)
+
+/*
+ * Redmi Note 5A Prime (MSM8940-PMI8937 MTP): same mi8937 family as ugglite,
+ * so the constants below were read from ugg's own live device tree
+ * (device-dumps/dt, "Qualcomm Technologies, Inc. MSM8940-PMI8937 MTP")
+ * rather than copied from ugglite:
+ *   soc/interrupt-controller@b000000 = qcom,msm-qgic2
+ *       reg <0xb000000 0x1000 0xb002000 0x1000>
+ *   reserved-memory/splash_region@83000000 = <0x90000000 0x1400000>, 720x1280
+ *   cpus: 8x arm,cortex-a53, reg 0x0-0x3 and 0x100-0x103
+ * Timer PPIs are <2,3,4,1> on this SoC (CNTV = INTID 20), confirmed by the
+ * U1 shim probe on hardware.
+ */
+#define BOARD_NAME	"ugg"
+#define BOARD_HAS_PROBE	1
+
+#ifndef FB_PHYS
+#define FB_PHYS		0x90000000UL
+#endif
+#define FB_PHYS_ALT	0x90000000UL
+#define FB_REGION_BASE	0x90000000UL
+#define FB_REGION_SIZE	0x1400000UL
+#define FB_W		720
+#define FB_H		1280
+#define FB_BPP		3		/* RGB888, 2160-byte rows */
+#define FB_SCALE	2
+#define FB_SWAP_RB	0
+
+#define GICD_BASE	0x0b000000UL
+#define GICC_BASE	0x0b002000UL
+#define GIC_IS_V2	1
+
+#define VTIMER_INTID	20
+#define PTIMER_INTID	19
+#define SGI_INTID	1
+
+/* Same LK family as ugglite: it does not place the payload here (see loader.c). */
+#define RAMDISK_PA	0x81000000UL
+#define RAMDISK_MAX	0x1000000UL
+
+/* restart@4ab000 (qcom,pshold) and msm-imem restart_reason@65c. */
+#define PSHOLD_PHYS		0x004ab000UL
+#define IMEM_RESTART_REASON	0x0860065cUL
+#define IMEM_BASE		0x08600000UL
+
+#define TLMM_BASE	0x01000000UL
+
+#elif defined(BOARD_UGGLITE)
+
+#define BOARD_NAME	"ugglite"
+#define BOARD_HAS_PROBE	1
+
+/*
+ * reserved-memory splash_region. The mainline DTS puts the simple-framebuffer
+ * at 0x90001000; the stock DTB has splash_region@83000000 at 0x90000000 with
+ * size 0x1400000. If the console comes up blank on hardware, rebuild with
+ * -DFB_PHYS=0x90000000.
+ */
+#ifndef FB_PHYS
+#define FB_PHYS		0x90001000UL
+#endif
+#define FB_PHYS_ALT	0x90000000UL
+/* Whole splash_region per the stock DTB: <0x90000000 0x1400000>. */
+#define FB_REGION_BASE	0x90000000UL
+#define FB_REGION_SIZE	0x1400000UL
+#define FB_W		720
+#define FB_H		1280
+#define FB_BPP		3		/* RGB888, mainline format "r8g8b8" */
+#define FB_SCALE	2
+#define FB_SWAP_RB	0
+
+/* qcom,msm-qgic2: GICv2, distributor + CPU interface in two frames. */
+#define GICD_BASE	0x0b000000UL
+#define GICC_BASE	0x0b002000UL
+#define GIC_IS_V2	1
+
+/*
+ * Timer PPI numbering. Both boards list the four architected timers as
+ * secure-phys, phys, virt, hyp, but the PPIs differ:
+ *   sweet   (msm8917-style list not used): <PPI 1,2,3,0> -> virt = INTID 19
+ *   ugglite (stock dtb_07 and mainline agree): <PPI 2,3,4,1> -> virt = INTID 20
+ * The probe tests VTIMER_INTID and reports it, because XNU has to know.
+ */
+#define VTIMER_INTID	20
+#define PTIMER_INTID	19
+#define SGI_INTID	1
+
+/*
+ * Where lk puts the ramdisk. The boot image header asks for 0x81000000
+ * (ramdisk_offset 0x1000000 from base 0x80000000), and unlike sweet's
+ * bootloader, ugglite's lk does not add linux,initrd-start/end to /chosen -
+ * the stock DTB's chosen node has only bootargs. The payload magic is
+ * checked before the address is trusted.
+ */
+#define RAMDISK_PA	0x81000000UL
+#define RAMDISK_MAX	0x1000000UL	/* 16 MiB scan window */
+
+/* restart@4ab000 (qcom,pshold) and msm-imem restart_reason@65c. */
+#define PSHOLD_PHYS		0x004ab000UL
+#define IMEM_RESTART_REASON	0x0860065cUL
+#define IMEM_BASE		0x08600000UL
+
+/* TLMM for the button/panel GPIOs (probe only reports it). */
+#define TLMM_BASE	0x01000000UL
+
+#else /* sweet, the default board */
+
+#define BOARD_NAME	"sweet"
+
+#define FB_PHYS		0x9c000000UL
+#define FB_PHYS_ALT	0x9c000000UL
+#define FB_W		1080
+#define FB_H		2400
+#define FB_BPP		4		/* a8r8g8b8 */
+#define FB_SCALE	3
+
+#define GICD_BASE	0x17a00000UL
+#define GICC_BASE	0x0UL		/* GICv3: redistributors, no GICC frame */
+#define GIC_IS_V2	0
+
+#define PSHOLD_PHYS		0x0c264000UL
+#define IMEM_RESTART_REASON	0x146aa65cUL
+#define IMEM_BASE		0x146a8000UL
+
+#define TLMM_BASE	0x03100000UL
+
+/* sweet keeps the Qualcomm PPI numbering where virt = PPI 3 = INTID 19. */
+#define VTIMER_INTID	19
+#define PTIMER_INTID	18
+#define SGI_INTID	1
+
+#endif

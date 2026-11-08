@@ -39,6 +39,23 @@ VTIMER_INTID = 19
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
 
+# --- ugg (Redmi Note 5A Prime, MSM8940 + PMI8937), from its live device tree ---
+# Kernel-managed RAM: above every fixed carve-out. The highest is the ABL splash
+# (0x90000000 + 0x1400000 -> ends 0x91400000), so start at 0x91600000. Must be
+# 2 MiB aligned: start.s maps the kernel with 2 MiB L2 blocks and masks the
+# physical address with ARM_TTE_BLOCK_L2_MASK. 512 MiB is plenty for bring-up.
+UGG_PHYS_BASE = 0x91600000
+UGG_MEM_SIZE = 0x20000000
+# qcom,msm-qgic2 (soc/interrupt-controller@b000000): distributor + CPU interface.
+UGG_GICD, UGG_GICD_SIZE = 0x0b000000, 0x1000
+UGG_GICC, UGG_GICC_SIZE = 0x0b002000, 0x1000
+UGG_VTIMER_INTID = 20              # timer PPIs <2,3,4,1>: CNTV = INTID 20
+# splash_region@83000000 = <0x90000000 0x1400000>; 720x1280 RGB888 (2160-byte rows).
+UGG_FB, UGG_FB_SIZE = 0x90000000, 0x1400000
+UGG_FB_W, UGG_FB_H, UGG_FB_BPP = 720, 1280, 3
+UGG_CANVAS_W, UGG_CANVAS_H = 750, 1334   # iPhone 8 (D20AP) points*2 fit 720x1280
+UGG_DISPLAY_SCALE = 2
+
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
@@ -74,13 +91,27 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
-    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
-    # Carve the panic log off the top so the kernel never allocates over it.
-    panic_base = phys_base + mem_size - PANIC_LOG_SIZE
-    mem_size -= PANIC_LOG_SIZE
-    gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+def build(seed=None, qemu=False, highmem=False, ugg=False):
+    """ugg: Redmi Note 5A (MSM8940, GICv2, 8x A53, 24bpp panel); qemu: QEMU virt."""
+    if ugg:
+        phys_base, mem_size = UGG_PHYS_BASE, UGG_MEM_SIZE
+        timebase = TIMEBASE
+        gicd, gicr = UGG_GICD, UGG_GICC
+        gicd_size, gicr_size = UGG_GICD_SIZE, UGG_GICC_SIZE
+        vtimer_intid = UGG_VTIMER_INTID
+    else:
+        phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+        gicd, gicr = (QEMU_GICD, QEMU_GICR) if qemu else (GICD, GICR)
+        gicd_size, gicr_size = GICD_SIZE, GICR_SIZE
+        timebase = QEMU_TIMEBASE if qemu else TIMEBASE
+        vtimer_intid = QEMU_VTIMER_INTID if qemu else VTIMER_INTID
+    # Panic log: ugg defines PLATFORM_PANIC_LOG_DISABLED (UGG.h), so no carve-out
+    # and no /pram node.
+    if ugg:
+        panic_base = 0
+    else:
+        panic_base = phys_base + mem_size - PANIC_LOG_SIZE
+        mem_size -= PANIC_LOG_SIZE
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -91,7 +122,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
+        *([] if ugg else [('embedded-panic-log-size', u32(PANIC_LOG_SIZE))]),
         ('firmware-version', cstr('sweet-shim')),
         ('system-firmware-version', cstr('sweet-shim')),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
@@ -105,7 +136,7 @@ def build(seed=None, qemu=False, highmem=False):
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
         # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. 1080x2400 @3x =
         # 360x800 points (like iPhone X class devices).
-        ('display-scale', u32(3)),
+        ('display-scale', u32(UGG_DISPLAY_SCALE if ugg else 3)),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
         # files), so e.g. DataMigration never records LastSystemVersion and
@@ -129,27 +160,35 @@ def build(seed=None, qemu=False, highmem=False):
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # SWEET SMP: all eight cores in physical-core order (0-5 Cortex-A55,
-    # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
-    # and uses cpus=N to select an initial prefix (N <= 8).
-    # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
+    # CPU list. reg is the real MPIDR (Aff1:Aff0), not the logical id; XNU
+    # assigns logical ids by DT order. ugg's real MPIDRs are cluster 0 =
+    # 0x0-0x3 and cluster 1 = 0x100-0x103 (8x Cortex-A53), and the boot CPU
+    # that LK/shim runs on is MPIDR 0x100 - it must be the node whose state is
+    # "running", because ml_parse_cpu_topology picks the boot CPU by that.
+    if ugg:
+        cpu_mpidrs = [0x0, 0x1, 0x2, 0x3, 0x100, 0x101, 0x102, 0x103]
+        cpu_compat = 'arm,cortex-a53'
+    else:
+        cpu_mpidrs = [core << 8 for core in range(1 if qemu else 8)]
+        cpu_compat = 'qcom,kryo470'
     cpu_nodes = []
-    for core in range(1 if qemu else 8):
-        cpu_nodes.append(node(f'cpu{core}', [
+    for i, m in enumerate(cpu_mpidrs):
+        boot = (m == 0x100) if ugg else (i == 0)
+        cpu_nodes.append(node(f'cpu{i}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
-            ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
+            ('compatible', cstr(cpu_compat) + cstr('ARM,v8')),
+            ('reg', u32(m)),         # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('cpu-id', u32(i)),      # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
             ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(core)),
-            ('l2-cache-id', u32(core)),  # distinct per-core L2 nodes in live FDT
-            ('l3-cache-id', u32(0)),     # shared L3
-            ('state', cstr('running' if core == 0 else 'stopped')),
+            ('cluster-core-id', u32(m & 0xff)),
+            ('l2-cache-id', u32(m & 0xff)),  # distinct per-core L2 nodes in live FDT
+            ('l3-cache-id', u32(0)),         # shared L3
+            ('state', cstr('running' if boot else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(1401000000 if ugg else (2304000000 if i >= 6 else 1804800000))),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -160,10 +199,10 @@ def build(seed=None, qemu=False, highmem=False):
 
     gic = node('gic', [
         ph(),
-        ('compatible', cstr('arm,gic-v3')),
+        ('compatible', cstr('arm,gic-v2') if ugg else cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
-        ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('virtual-timer-intid', u32(vtimer_intid)),
+        ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -185,16 +224,16 @@ def build(seed=None, qemu=False, highmem=False):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(UGG_CANVAS_W if ugg else 1125)),
+            ('canvas-height', u32(UGG_CANVAS_H if ugg else 2436)),
         ])])
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('reg', u64(UGG_FB, UGG_FB_SIZE) if ugg else u64(FB, FB_SIZE)),
+        ('width', u32(UGG_FB_W if ugg else FB_W)),
+        ('height', u32(UGG_FB_H if ugg else FB_H)),
+        ('stride', u32(UGG_FB_W * UGG_FB_BPP if ugg else FB_STRIDE)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
@@ -224,25 +263,26 @@ def build(seed=None, qemu=False, highmem=False):
 
     # Panic log region. /pram reg = <phys size>; it sits just above the
     # dram-size we expose, so XNU maps it but never allocates into it.
-    pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
+    pram = None if ugg else node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,msm8940' if ugg else 'qcom,sm7150') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + ([pram] if pram else []) + product + ([] if (qemu or ugg) else [ufs]))
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                 ugg='--ugg' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

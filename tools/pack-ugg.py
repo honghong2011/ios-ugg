@@ -38,7 +38,20 @@ def pad(data, size=PAGE):
     return data + b"\0" * (-len(data) % size)
 
 
-def build_image(kernel, ramdisk, bundle, cmdline):
+def build_image(kernel, ramdisk, bundle, cmdline, payload=b""):
+    if payload:
+        # The mi8937 LK does not place the ramdisk at ramdisk_addr (measured by
+        # the uglite port), and does not report it in /chosen either. It does
+        # decompress the kernel and lay it out contiguously, so the shim finds
+        # the XNU payload right after its own _end. Pad the shim Image to a
+        # 16 KiB boundary, append the payload, and update the arm64 Image
+        # header's image_size (offset 8, "text_offset" is 0) to the whole
+        # length - LK uses that field to know how far the kernel extends.
+        k = bytearray(kernel)
+        k += b"\0" * (-len(k) % 0x4000)
+        k += payload
+        struct.pack_into("<Q", k, 8, len(k))
+        kernel = bytes(k)
     gz = gzip_bytes(kernel)
     if bundle and bundle[:4] != FDT_MAGIC:
         sys.exit("error: dt bundle does not start with an FDT magic")
@@ -72,21 +85,25 @@ def build_image(kernel, ramdisk, bundle, cmdline):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--kernel", required=True, help="raw arm64 Image")
-    ap.add_argument("--ramdisk", required=True, help="gzip'd cpio ramdisk")
+    ap.add_argument("--payload", help="XNU payload (tools/mkpayload.py) appended to the Image")
+    ap.add_argument("--ramdisk", help="gzip'd cpio ramdisk (omit for none)")
     ap.add_argument("--dtbundle", help="concatenated FDTs appended to Image.gz")
     ap.add_argument("--cmdline", default="console=null")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     kernel = open(a.kernel, "rb").read()
-    ramdisk = open(a.ramdisk, "rb").read()
+    ramdisk = open(a.ramdisk, "rb").read() if a.ramdisk else b""
     bundle = open(a.dtbundle, "rb").read() if a.dtbundle else b""
+    payload = open(a.payload, "rb").read() if a.payload else b""
 
-    image, gz, section = build_image(kernel, ramdisk, bundle, a.cmdline)
+    image, gz, section = build_image(kernel, ramdisk, bundle, a.cmdline, payload)
     with open(a.out, "wb") as f:
         f.write(image)
 
     print("kernel Image     : %d bytes" % len(kernel))
+    if payload:
+        print("XNU payload      : %d bytes (appended at 16K, image_size +=" % len(payload))
     print("Image.gz         : %d bytes" % len(gz))
     print("DTB bundle       : %d bytes (starts at file offset 0x%x)"
           % (len(bundle), PAGE + len(gz)))

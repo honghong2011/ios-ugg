@@ -11,9 +11,22 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+#include "mmu.h"
+
+#define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
+#define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
 
 #define BOOT_LINE_LENGTH	608
-#define PAGE_16K		0x4000UL
+/*
+ * Hardware page size for the boot_args placement. sweet is a 16K kernel;
+ * ugglite's Cortex-A53 has no 16K granule, so its kernel pages are 4K and
+ * boot_args/topOfKernelData must be aligned to that.
+ */
+#if defined(BOARD_UGGLITE) || defined(BOARD_UGG)
+#define BOOT_PAGE		0x1000UL
+#else
+#define BOOT_PAGE		0x4000UL
+#endif
 
 struct payload_seg {
 	uint64_t vmaddr, vmsize, file_off, file_size;
@@ -81,8 +94,21 @@ const char *loader_boot(uintptr_t dtb)
 	uint64_t rd_start, rd_end;
 
 	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
-	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
-		return "no initrd in /chosen";
+	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end)) {
+		/*
+		 * ugglite's lk does not report the ramdisk in /chosen and does
+		 * not place it at the header's ramdisk_addr (measured), so the
+		 * payload is appended to the kernel image instead and found
+		 * relative to the shim's own load address.
+		 */
+		extern uintptr_t sweet_payload_addr(void);
+		uintptr_t pa = sweet_payload_addr();
+
+		if (!pa)
+			return "no payload after shim";
+		rd_start = pa;
+		rd_end = pa + 0x2000000;	/* 32 MiB ceiling; size comes from the header */
+	}
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	const struct payload *p = (const struct payload *)rd_start;
@@ -112,10 +138,10 @@ const char *loader_boot(uintptr_t dtb)
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
-	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
-	uintptr_t top = ba_pa + PAGE_16K;
+	uintptr_t ba_pa = (adt_pa + p->adt_size + BOOT_PAGE - 1) & ~(BOOT_PAGE - 1);
+	uintptr_t top = ba_pa + BOOT_PAGE;
 
-	zero64(ba_pa, PAGE_16K);
+	zero64(ba_pa, BOOT_PAGE);
 	volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;
 	ba->Revision = 2;
 	ba->Version = 2;
@@ -123,12 +149,12 @@ const char *loader_boot(uintptr_t dtb)
 	ba->physBase = p->phys_base;
 	ba->memSize = p->mem_size;
 	ba->topOfKernelData = top;
-	ba->Video.v_baseAddr = FB_BASE;
+	ba->Video.v_baseAddr = FB_PHYS;
 	ba->Video.v_display = 1;
 	ba->Video.v_rowBytes = FB_STRIDE;
 	ba->Video.v_width = FB_W;
 	ba->Video.v_height = FB_H;
-	ba->Video.v_depth = 32;
+	ba->Video.v_depth = FB_BPP * 8;
 	ba->deviceTreeP = adt_pa - pa_of_va_base;	/* xnu reads it with the MMU on: a VA */
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
@@ -137,11 +163,155 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
+	/*
+	 * Prove the copy landed: read the first word back from the entry point
+	 * and from phys_base. If these do not match the payload's bytes, the
+	 * destination is not writable RAM (an XPU carve-out, or the wrong base),
+	 * which is a very different failure from a bad entry address.
+	 */
+	con_hex("WROTE", *(volatile uint32_t *)entry_pa);
+	con_hex("EXPECT", *(const uint32_t *)(rd_start +
+	    (p->segs[2].file_off + (p->entry_va - p->segs[2].vmaddr))));
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
+	/*
+	 * Enter XNU with the MMU ON and its RAM mapped Normal write-back.
+	 * With the MMU off every fetch is Device-nGnRnE, and instruction fetch
+	 * from Device memory is constrained-unpredictable; on this A53 the
+	 * branch to the entry point then produced no output at all. XNU's own
+	 * start.s reprograms the MMU from scratch, so the mapping only has to
+	 * be sane for the first few instructions.
+	 */
+	/*
+	 * Leave the MMU OFF, as on sweet. The previous attempt to enter with it
+	 * on was a hypothesis that did not help, and it also risked unmapping
+	 * the shim's own code mid-flight.
+	 */
+	/*
+	 * Keep the shim's exception vectors installed across the jump.
+	 *
+	 * XNU sets VBAR_EL1 early (before it has mapped the vectors' address), so
+	 * any fault in its first instructions vectors into unmapped memory and
+	 * the machine simply stops with no output - exactly what we see. Pointing
+	 * VBAR_EL1 back at the shim's table means such a fault lands in
+	 * exc_handler(), which prints ESR/ELR/FAR on the panel and tells us which
+	 * instruction failed.
+	 */
+	{
+		extern char vectors[];
+		uintptr_t vb = (uintptr_t)vectors;
+
+		__asm__ volatile("msr vbar_el1, %0" : : "r"(vb) : "memory");
+		__asm__ volatile("isb" ::: "memory");
+	}
+
+	/*
+	 * Arm a one-shot watchdog before entering XNU: GICv2 distributor and CPU
+	 * interface enabled, virtual timer PPI unmasked, CNTV firing once about
+	 * a second from now. If XNU hangs in a loop (no exception, so the vector
+	 * table never runs) this interrupt still lands in the shim's handler,
+	 * which prints the interrupted PC. XNU masks interrupts itself early on,
+	 * so this only helps before that point - which is exactly where it hangs.
+	 */
+#if GIC_IS_V2
+	{
+		volatile uint32_t *gicd = (volatile uint32_t *)GICD_BASE;
+		volatile uint32_t *gicc = (volatile uint32_t *)GICC_BASE;
+		uint32_t ctfrq = (uint32_t)rsr("cntfrq_el0");
+
+		gicd[0x000 / 4] = 1;			/* GICD_CTLR enable */
+		gicd[0x080 / 4] = 0xffffffff;		/* IGROUPR0: all Group 1 */
+		gicd[0x100 / 4] = (1u << VTIMER_INTID);	/* ISENABLER0 */
+		gicd[0x400 / 4] = 0xa0a0a0a0;		/* IPRIORITYR0 */
+		gicc[0x004 / 4] = 0xff;			/* PMR */
+		gicc[0x000 / 4] = 1;			/* CTLR enable */
+
+		wsr("cntv_tval_el0", ctfrq);		/* ~1 s */
+		wsr("cntv_ctl_el0", 1);			/* enable, unmask */
+		__asm__ volatile("isb" ::: "memory");
+	}
+#endif
+
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+
+	/*
+	 * Paint a distinctive bar into the framebuffer from the shim, then call
+	 * XNU. If the bar appears but XNU's stage-0 fill does not, execution
+	 * reached the call and died inside XNU; if the bar does not appear, the
+	 * shim never got this far.
+	 */
+	{
+		volatile uint8_t *fb = (volatile uint8_t *)FB_PHYS;
+		for (int y = 0; y < 8; y++)
+			for (int x = 0; x < FB_W; x++) {
+				volatile uint8_t *p2 = fb + (uintptr_t)(FB_H - 16 + y) * FB_STRIDE
+				    + (uintptr_t)x * FB_BPP;
+#if FB_BPP == 4
+				*(volatile uint32_t *)p2 = 0xff00ffffu;
+#else
+				p2[0] = 0xff; p2[1] = 0x00; p2[2] = 0xff;
+#endif
+			}
+	}
 	((xnu_entry_t)entry_pa)(ba_pa);
+
+	/*
+	 * Reached only if XNU returns (it should never) or if the call faults
+	 * back into the shim. Paint green over the bottom of the panel so the
+	 * difference from a hang is visible on screen.
+	 */
+	{
+		volatile uint8_t *fb = (volatile uint8_t *)FB_PHYS;
+		for (int y = 0; y < 32; y++)
+			for (int x = 0; x < FB_W; x++) {
+				volatile uint8_t *q = fb + (uintptr_t)(FB_H - 48 + y) * FB_STRIDE
+				    + (uintptr_t)x * FB_BPP;
+#if FB_BPP == 4
+				*(volatile uint32_t *)q = 0xff00ff00u;
+#else
+				q[0] = 0x00; q[1] = 0xff; q[2] = 0x00;
+#endif
+			}
+	}
 	return "xnu returned";
+}
+
+/*
+ * Where is the payload?
+ *
+ * On sweet, ABL reports linux,initrd-start/end in /chosen and loader_boot()
+ * uses that. ugglite's lk does not: its stock DTB's chosen node has only
+ * bootargs, and measurement showed the ramdisk is not placed at the boot image
+ * header's ramdisk_addr either (0x81000000 read back as unrelated data, and a
+ * 64 KiB test ramdisk was not found there either). lk does reliably load and
+ * decompress the KERNEL, so shim/build.sh appends the payload to the kernel
+ * image and the shim looks for it relative to its own load address.
+ *
+ * The image is linked at 0, so `&_end` is the offset of the byte just past
+ * the shim within the loaded image; the payload follows at a 16K boundary.
+ */
+uintptr_t
+sweet_payload_addr(void)
+{
+	extern char _end[];
+	/* Position independent: _end's address is base + its link-time offset. */
+	uintptr_t self_end = (uintptr_t)_end;
+	uintptr_t cand = (self_end + 0x3fff) & ~(uintptr_t)0x3fff;
+
+	/*
+	 * Check the version as well as the magic: the string "SWEETXNU" also
+	 * appears in this file (magic_ok's own comparison), so the magic alone
+	 * is not enough to identify a payload.
+	 */
+	for (int i = 0; i <= 8; i++) {
+		uintptr_t a = cand + (uintptr_t)i * 0x4000;
+		const struct payload *p = (const struct payload *)a;
+
+		if (magic_ok(p->magic) && p->version == 1 &&
+		    p->nsegs > 0 && p->nsegs < 64)
+			return a;
+	}
+	return 0;
 }
