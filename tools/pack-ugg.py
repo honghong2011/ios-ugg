@@ -45,12 +45,15 @@ def build_image(kernel, ramdisk, bundle, cmdline, payload=b""):
         # decompress the kernel and lay it out contiguously, so the shim finds
         # the XNU payload right after its own _end. Pad the shim Image to a
         # 16 KiB boundary, append the payload, and update the arm64 Image
-        # header's image_size (offset 8, "text_offset" is 0) to the whole
-        # length - LK uses that field to know how far the kernel extends.
+        # header's size fields to the whole length:
+        #   offset 8  = text_offset (kept in step with uglite's build.sh, which
+        #               wrote the total here and booted on the same LK family)
+        #   offset 16 = image_size (the spec field, "Effective Image size")
         k = bytearray(kernel)
         k += b"\0" * (-len(k) % 0x4000)
         k += payload
         struct.pack_into("<Q", k, 8, len(k))
+        struct.pack_into("<Q", k, 16, len(k))
         kernel = bytes(k)
     gz = gzip_bytes(kernel)
     if bundle and bundle[:4] != FDT_MAGIC:

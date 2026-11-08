@@ -35,15 +35,33 @@ jobs:
           name: build-log
           path: build.log
 
+      - name: Surface build errors as annotation
+        if: always()
+        run: |
+          python3 - <<'PY' || true
+          import os, re
+          if not os.path.exists('build.log'):
+              print('::notice title=build-log::no build.log')
+              raise SystemExit
+          errs = [ln.rstrip() for ln in open('build.log', errors='replace')
+                  if re.search(r'error:|Error [0-9]|\*\*\* ', ln)]
+          if not errs:
+              print('::notice title=build-errors::none')
+          for e in errs[:10]:
+              print('::error title=shim-build::' + e.replace('%', '%%')[:380])
+          print('::notice title=build-error-count::%d' % len(errs))
+          PY
+
       - name: Check shim Image
         run: |
           python3 - <<'PY'
           import struct
           d = open('shim/out/Image', 'rb').read()
           assert d[56:60] == b'ARM\x64', 'arm64 Image magic missing'
-          isz = struct.unpack_from('<Q', d, 8)[0]
-          assert 0 < isz <= len(d), 'image_size %#x vs file %#x' % (isz, len(d))
-          print('shim Image OK: %d bytes, image_size 0x%x' % (len(d), isz))
+          # arm64 Image header: text_offset at 8, image_size at 16.
+          off, isz = struct.unpack_from('<2Q', d, 8)
+          assert isz != 0 and isz <= len(d), 'image_size %#x vs file %#x' % (isz, len(d))
+          print('shim Image OK: %d bytes, text_offset 0x%x image_size 0x%x' % (len(d), off, isz))
           PY
 
       - name: Report shim as annotation
