@@ -1,0 +1,278 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 27c5460..7350b75 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -425,6 +425,78 @@ start_cpu:
+ 	str		$5, [$3]							// Write entry to L1 table
+ .endmacro
+ 
++#ifdef BOARD_UGG
++/*
++ * create_l0_table_entry
++ *
++ * ugg walks a 48-bit VA (T0SZ=T1SZ=16), so both translation roots are level 0
++ * tables and the entry that points at the next level is indexed by VA[47:39].
++ * The L1 helper above cannot be reused: it indexes with VA[38:30], which for
++ * an L0 table writes at the wrong slot. The hardware would then read a zero
++ * entry at index 0x1fc and fault on the first fetch after MSR SCTLR_EL1.
++ *
++ *   arg0 - Virtual address
++ *   arg1 - L0 table address
++ *   arg2 - L1 table address
++ *   arg3 - Scratch register
++ *   arg4 - Scratch register
++ *   arg5 - Scratch register
++ */
++.macro create_l0_table_entry
++	and		$3,	$0, #(ARM_TT_L0_INDEX_MASK)
++	lsr		$3, $3, #(ARM_TT_L0_SHIFT)
++	lsl		$3, $3, #(TTE_SHIFT)
++	add		$3, $1, $3
++	mov		$4, #(ARM_TTE_BOOT_TABLE)
++	and		$5, $2, #(ARM_TTE_TABLE_MASK)
++	orr		$5, $4, $5
++	str		$5, [$3]
++.endmacro
++
++#ifdef BOARD_UGG
++/*
++ * ugg_mark_bar
++ *
++ * Draw one 17x32 pixel marker bar into the bottom 32 rows of LK's RGB888
++ * splash buffer, at x offset $0 in colour $1 (a 24-bit 0x00RRGGBB value).
++ *
++ * This runs before the MMU, before the stack and before any C code, so it is
++ * the only evidence of progress if the CPU dies inside start.s. The geometry
++ * matches sweet_early_mark() so that both ladders read the same way: the bottom
++ * 32 rows are the marker band and one stage is 17 pixels wide. Stages drawn
++ * before C starts use x = 600 + n * 17, which keeps them clear of the C ladder
++ * (x = stage * 17 for stages 1..40) and of sweet's initial 64-pixel bar at x=0.
++ *
++ * ugg's panel is 720x1280 RGB888 with 2160-byte rows, i.e. three bytes per
++ * pixel, hence the byte stores rather than a word store.
++ *
++ * Clobbers x0-x6. In particular it must not run between the two
++ * create_bootstrap_mapping calls, where x14/x15 hold the KVA cursors.
++ */
++.macro ugg_mark_bar xoff, colour
++	MOV64	x0, (0x90000000 + 2160 * 1248)
++	add		x0, x0, $0, lsl #1
++	add		x0, x0, $0						// x0 += 3 * xoff: bytes per pixel
++	MOV32	w1, $1
++	mov		x2, #32							// rows
++	mov		x4, #2160						// row stride in bytes
++9:	mov		x3, #17							// pixels per row
++	mov		x5, x0
++8:	strb	w1, [x5], #1
++	lsr		w6, w1, #8
++	strb	w6, [x5], #1
++	lsr		w6, w1, #16
++	strb	w6, [x5], #1
++	subs	x3, x3, #1
++	b.ne	8b
++	add		x0, x0, x4
++	subs	x2, x2, #1
++	b.ne	9b
++	dsb		sy
++.endmacro
++#endif /* BOARD_UGG */
++#endif /* BOARD_UGG */
++
+ /*
+  * create_l2_block_entries
+  *
+@@ -524,7 +596,15 @@ LEXT(start_first_cpu)
+ 	mov		x21, #0
+ 
+ #if defined(SWEET)
+-	/* Stage 0: white 64x32 band, no stack or page tables needed. */
++	/*
++	 * Stage 0 marker: no stack, no page tables and no C yet, so this is a
++	 * raw store through the identity mapping LK set up for the splash buffer.
++	 * ugg draws one 17x32 bar at x=600 (white) with ugg_mark_bar; sweet keeps
++	 * its original 64x32 word-wide band at the bottom left.
++	 */
++#if defined(BOARD_UGG)
++	ugg_mark_bar 600, 0x00ffffff
++#else
+ 	MOV64	x0, (0x9c000000 + 2368 * 4320)
+ 	mov		w1, #-1
+ 	mov		x2, #32
+@@ -540,7 +620,8 @@ Lsweet_mark_pixel:
+ 	subs	x2, x2, #1
+ 	b.ne	Lsweet_mark_row
+ 	dsb		sy
+-#endif
++#endif /* BOARD_UGG */
++#endif /* SWEET */
+ 
+ 	// Set low reset vector before attempting any loads
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+@@ -604,7 +685,11 @@ Lsweet_mark_pixel:
+ 	mov		x0, #(ARM_TTE_EMPTY)				// Load invalid entry template
+ 	mov		x1, x25								// Start at V=P pagetable root
+ 	mov		x2, #(TTE_PGENTRIES)				// Load number of entries per page
++#if defined(BOARD_UGG)
++	lsl		x2, x2, #3							// Shift by 3 for num entries on 8 pages
++#else
+ 	lsl		x2, x2, #2							// Shift by 2 for num entries on 4 pages
++#endif
+ 
+ Linvalidate_bootstrap:							// do {
+ 	str		x0, [x1], #(1 << TTE_SHIFT)			//   Invalidate and advance
+@@ -663,39 +748,89 @@ Lkernelcache_base_found:
+ 	mov		x15, x23
+ 
+ 	/*
+-	 * Allocate L1 tables
+-	 * x1 - V=P L1 page
+-	 * x3 - KVA L1 page
+-	 * x2 - free mem pointer from which we allocate a variable number of L2
+-	 * pages. The maximum number of bootstrap page table pages is limited to
++	 * Allocate bootstrap tables.
++	 * x1 - V=P root page
++	 * x3 - V=P L1 page
++	 * x2 - KVA root page
++	 * x27 - KVA L1 page (ugg only)
++	 * x28 - free memory pointer from which L2 pages are allocated (ugg only)
++	 *
++	 * The maximum number of bootstrap page table pages is limited to
+ 	 * BOOTSTRAP_TABLE_SIZE. For a 2G 4k page device, assuming the worst-case
+-	 * slide, we need 1xL1 and up to 3xL2 pages (1GB mapped per L1 entry), so
+-	 * 8 total pages for V=P and KVA.
++	 * slide, we need 1 root and up to 3 L2 pages (1GB mapped per root entry),
++	 * so 8 total pages for V=P and KVA.
++	 *
++	 * A 48-bit VA (ugg: T0SZ=T1SZ=16) adds a level: cpu_tte is an L0 table
++	 * whose entries point at L1 tables, and it is the L1 tables that the
++	 * mapping code below fills. The extra pages are why ugg reserves eight.
+ 	 */
+ 	mov		x1, x25
+ 	add		x3, x1, PGBYTES
++#if defined(BOARD_UGG)
++	/* V=P L0 page 0, V=P L1 page 1, KVA L0 page 2, KVA L1 page 3, L2s after */
++	add		x2, x3, PGBYTES
++	add		x27, x2, PGBYTES
++	mov		x28, x27
++	create_l0_table_entry x0, x1, x3, x6, x7, x8
++	create_l0_table_entry x14, x2, x27, x6, x7, x8
++#else
+ 	mov		x2, x3
++#endif
+ 
+ 	/*
+ 	 * Setup the V=P bootstrap mapping
+ 	 * x5 - total number of L2 entries to allocate
+ 	 */
+ 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
+-	/* create_bootstrap_mapping(vbase, pbase, num_ents, L1 table, freeptr) */
++	/* create_bootstrap_mapping(vbase, pbase, num_ents, root-or-L1 table, freeptr) */
++#if defined(BOARD_UGG)
++	create_bootstrap_mapping x0,  x4,  x5, x3, x28, x6, x10, x11, x12, x13
++#else
+ 	create_bootstrap_mapping x0,  x4,  x5, x1, x2, x6, x10, x11, x12, x13
++#endif
+ 
+ 	/* Setup the KVA bootstrap mapping */
+ 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
++#if defined(BOARD_UGG)
++	create_bootstrap_mapping x14, x15, x5, x27, x28, x9, x10, x11, x12, x13
++#else
+ 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
++#endif
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+-	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+-	 * create_bootstrap_mapping would replace the RAM L2 table.
+-	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+-	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
++	 * Splash framebuffer: Normal-NC block entries installed directly into the
++	 * EXISTING V=P L2 table. The framebuffer and the bring-up RAM that the
++	 * mapping above covers share one root entry, so the entries have to be
++	 * added by hand; calling create_bootstrap_mapping again would allocate a
++	 * second L2 table for the same root entry and lose the RAM mapping.
++	 *
++	 * The RAM L2 table is the first one the V=P mapping allocated, which for
++	 * ugg (eight bootstrap pages: V=P L0/L1, KVA L0/L1, then L2s) is
++	 * bootstrap_pagetables + 4*PGBYTES, and for sweet (16K pages, four pages)
++	 * is bootstrap_pagetables + 2*PGBYTES. In both layouts the framebuffer's
++	 * 2MiB slot in that table sits below the first RAM entry, so it is empty.
++	 *
++	 * sweet's panel is 1080x2400 a8r8g8b8: 10 MiB, one 32MB block. ugg's is
++	 * 720x1280 RGB888 at a 2160-byte stride = 0x2a3000 bytes, which needs two
++	 * 2MiB blocks (a single block would end at row 971 and the marker band at
++	 * the bottom of the panel would be unmapped - writing it takes a
++	 * translation fault and hangs the boot).
+ 	 */
++#if defined(BOARD_UGG)
++	MOV64	x10, 0x90000000
++	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	orr		x11, x11, x10
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	add		x13, x25, #(4 * PGBYTES)
++	mov		x14, #2							// 2 MiB blocks covering 0x2a3000 bytes
++7:	str		x11, [x13, x12, lsl #TTE_SHIFT]
++	add		x11, x11, #(ARM_TT_L2_SIZE)
++	add		x12, x12, #1
++	subs	x14, x14, #1
++	b.ne	7b
++#else
+ 	MOV64	x10, 0x9c000000
+ 	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+ 	orr		x11, x11, x10
+@@ -703,7 +838,13 @@ Lkernelcache_base_found:
+ 	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+ 	add		x13, x25, #(2 * PGBYTES)
+ 	str		x11, [x13, x12, lsl #TTE_SHIFT]
++#endif /* BOARD_UGG */
++#if defined(BOARD_UGG)
++	/* Magenta: both bootstrap mappings and the framebuffer alias are in place. */
++	ugg_mark_bar 617, 0xff00ff
+ #endif
++#endif /* SWEET */
++
+ 
+ 	/* Ensure TTEs are visible */
+ 	dsb		ish
+@@ -743,7 +884,7 @@ common_start:
+ 
+ 	/* Set up translation table base registers.
+ 	 *	TTBR0 - V=P table @ top of kernel
+-	 *	TTBR1 - KVA table @ top of kernel + 1 page
++	 *	TTBR1 - KVA table (ugg: the KVA L0 root, two pages in)
+ 	 */
+ #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+ 	/* Note that for KTRR configurations, the V=P map will be modified by
+@@ -754,7 +895,11 @@ common_start:
+ 	mov		x19, lr
+ 	bl		EXT(set_mmu_ttb)
+ 	mov		lr, x19
++#if defined(BOARD_UGG)
++	add		x0, x25, #(2 * PGBYTES)
++#else
+ 	add		x0, x25, PGBYTES
++#endif
+ 	and		x0, x0, #(TTBR_BADDR_MASK)
+ 	MSR_TTBR1_EL1_X0
+ 
+@@ -847,6 +992,17 @@ common_start:
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
++#if defined(BOARD_UGG)
++	/*
++	 * Yellow: the MMU is on and this store proves the new translation is
++	 * live. The framebuffer is mapped Normal-NC (write-combining), so the
++	 * bytes reach the panel without any cache maintenance, and anything
++	 * wrong in the L0/L1/L2 bootstrap tables shows up here as a hang rather
++	 * than as a mystery later.
++	 */
++	ugg_mark_bar 634, 0xffff00
++#endif
++
+ #if !VMAPPLE && !defined(SWEET)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+ 	cmp		x0, x1

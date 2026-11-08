@@ -1,0 +1,96 @@
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index e01c124..5c308a3 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -950,9 +950,23 @@
+ #define T0SZ_BOOT 17ULL
+ #endif /* !__ARM64_PMAP_SUBPAGE_L1__ */
+ #else /* __ARM_16K_PG__ */
+-#if __ARM64_PMAP_SUBPAGE_L1__
++#if defined(UGG)
++/*
++ * MSM8937 Cortex-A53 (4K granule only): a 48-bit VA with a level-0 root.
++ *
++ * 16 is the only usable value here, not a preference. pmap_table_level_info_4k[]
++ * and start.s's create_l0_table_entry both index the root with the fixed
++ * ARM_4K_TT_L0_INDEX_MASK, i.e. VA[47:39], a 9-bit index. T0SZ narrows the
++ * hardware's L0 index field: at T0SZ=23 (41-bit VA) the walk looks only at
++ * VA[40:39], so a table entry the software wrote at index 0x1fc is read back
++ * at index 0 and the first fetch after MSR SCTLR_EL1 takes a level-0 fault.
++ * T0SZ=16 keeps that index at 9 bits, and pta_root_level, computed as
++ * (T0SZ_BOOT - 16) / 9, comes out as 0 to match.
++ */
++#define T0SZ_BOOT 16ULL
++#elif __ARM64_PMAP_SUBPAGE_L1__
+ #define T0SZ_BOOT 26ULL
+-#else /* __ARM64_PMAP_SUBPAGE_L1__ */
++#else /* !__ARM64_PMAP_SUBPAGE_L1__ */
+ #define T0SZ_BOOT 25ULL
+ #endif /* __ARM64_PMAP_SUBPAGE_L1__ */
+ #endif /* __ARM_16K_PG__ */
+@@ -968,9 +982,19 @@
+ #define T1SZ_BOOT 17ULL
+ #endif /* !__ARM64_PMAP_SUBPAGE_L1__ */
+ #else /* __ARM_16K_PG__ */
+-#if __ARM64_PMAP_SUBPAGE_L1__
++#if defined(UGG)
++/*
++ * Same 48-bit geometry as T0SZ above, so TTBR1 also walks with a 9-bit L0
++ * index. VM_MIN_KERNEL_ADDRESS is 0xfffffe0000000000 and the kernel links at
++ * 0xfffffe0007004000; T1SZ=16 puts the TTBR1 region base at 0xffff000000000000,
++ * which contains both (T1SZ=26 would start it at 0xffffffc000000000 and exclude
++ * them). Keeping T1SZ equal to T0SZ also keeps kernel_pmap->min in step with
++ * the link address.
++ */
++#define T1SZ_BOOT 16ULL
++#elif __ARM64_PMAP_SUBPAGE_L1__
+ #define T1SZ_BOOT 26ULL
+-#else /* __ARM64_PMAP_SUBPAGE_L1__ */
++#else /* !__ARM64_PMAP_SUBPAGE_L1__ */
+ #define T1SZ_BOOT 25ULL
+ #endif /*__ARM64_PMAP_SUBPAGE_L1__*/
+ #endif /* __ARM_16K_PG__ */
+@@ -1226,10 +1250,12 @@
+ 
+ /* some sugar for getting pointers to page tables and entries */
+ 
++#define L0_TABLE_INDEX(va) (((va) & ARM_TT_L0_INDEX_MASK) >> ARM_TT_L0_SHIFT)
+ #define L1_TABLE_INDEX(va) (((va) & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT)
+ #define L2_TABLE_INDEX(va) (((va) & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT)
+ #define L3_TABLE_INDEX(va) (((va) & ARM_TT_L3_INDEX_MASK) >> ARM_TT_L3_SHIFT)
+ 
++#define L1_TABLE_VA(tte)  ((tt_entry_t*) phystokv((*(tte)) & ARM_TTE_TABLE_MASK))
+ #define L2_TABLE_VA(tte)  ((tt_entry_t*) phystokv((*(tte)) & ARM_TTE_TABLE_MASK))
+ #define L3_TABLE_VA(tte2) ((pt_entry_t*) phystokv((*(tte2)) & ARM_TTE_TABLE_MASK))
+ 
+@@ -1357,10 +1383,30 @@
+ #define ARM_TT_TWIG_SHIFT      ARM_TT_L2_SHIFT
+ #define ARM_TT_TWIG_INDEX_MASK ARM_TT_L2_INDEX_MASK
+ 
++/*
++ * The kernel's page-table walk for ugg starts at level 0.
++ *
++ * The generic 4K configurations and every 16K build put the root at L1 (a
++ * 38/39-bit VA, T0SZ 25 or 26). ugg sets T0SZ=T1SZ=16 for a 48-bit VA, where
++ * the root is L0 and one entry covers 512GB, so cpu_tte is an L0 table and
++ * navigating it as if it were an L1 indexes it with the wrong bits. Anything
++ * that walks cpu_tte must use ARM_TT_ROOT_* (and ARM_TT_ROOT_LEVEL to know how
++ * many levels it has to descend); otherwise the entry is written at index 0
++ * while the hardware reads index 0x1fc, and the first fetch faults.
++ */
++#if defined(UGG)
++#define ARM_TT_ROOT_SIZE       ARM_TT_L0_SIZE
++#define ARM_TT_ROOT_OFFMASK    ARM_TT_L0_OFFMASK
++#define ARM_TT_ROOT_SHIFT      ARM_TT_L0_SHIFT
++#define ARM_TT_ROOT_INDEX_MASK ARM_TT_L0_INDEX_MASK
++#define ARM_TT_ROOT_LEVEL      0
++#else
+ #define ARM_TT_ROOT_SIZE       ARM_TT_L1_SIZE
+ #define ARM_TT_ROOT_OFFMASK    ARM_TT_L1_OFFMASK
+ #define ARM_TT_ROOT_SHIFT      ARM_TT_L1_SHIFT
+ #define ARM_TT_ROOT_INDEX_MASK ARM_TT_L1_INDEX_MASK
++#define ARM_TT_ROOT_LEVEL      1
++#endif
+ 
+ /*
+  * 4KB granule size:
