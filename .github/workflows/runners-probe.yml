@@ -1,0 +1,28 @@
+name: runners-probe
+
+# Throwaway diagnostic: which GitHub-hosted macOS images can this
+# repository actually provision? Each unavailable label is cancelled
+# within ~1s (runner_id 0), available ones run the tiny probe below.
+# Candidate set is limited to free public-repo images on purpose:
+# no -large / -xlarge (those are billed).
+on:
+  push:
+    branches: [ci-probe]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14, macos-15, macos-15-intel, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Report
+        run: |
+          echo "label=${{ matrix.os }}"
+          uname -a
+          sw_vers 2>/dev/null || true
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          xcodebuild -version 2>/dev/null || true
+          xcrun --find iig 2>/dev/null || echo "no iig"
