@@ -34,9 +34,13 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 (which ships Xcode 15.x, whose iig matches the xnu-8796 IORPC
+    # ABI) is not provisionable for this account: the label resolves to the
+    # arm64 image 'macos-14-arm64-us-default' and the job is cancelled before
+    # any step runs. macos-13 is retired (queues forever), and the plain
+    # macos-15 label is arm64 too. So: macos-15-intel, whose only Xcodes are
+    # 16.x/26.x -- iig 16's IORPC ABI is handled by the patch chain.
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +60,8 @@ jobs:
       - name: Deps
         run: |
           brew install jq gum bash cmake ninja
-          # build.sh only checks that xcodes exists (Xcode is preinstalled); no bottle on macOS 14
+          # build.sh only checks that xcodes exists (Xcode is preinstalled);
+          # there is no bottle for it on the current images
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
           sw_vers
@@ -72,7 +77,39 @@ jobs:
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee ../build.log
+
+      - name: Surface failures as check annotations
+        # Job logs on this repository require admin rights, but check
+        # annotations are world-readable, so push the diagnosis through them:
+        # that is what makes the build iterable without a token.
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import re
+          try:
+              log = open('build.log', errors='replace').read()
+          except OSError as exc:
+              print(f"::warning title=no-build-log::{exc}")
+              raise SystemExit(0)
+
+          def ann(kind, title, body):
+              esc = (body.replace('%', '%25').replace('\r', '').replace('\n', '%0A'))
+              print(f"::{kind} title={title}::{esc[:60000]}")
+
+          applied = re.findall(r'Applying patch: (\S+)', log)
+          skipped = re.findall(r'Skipping patch (\S+)[^\n]*', log)
+          ann('notice', 'patch-report', f"applied={len(applied)} skipped={len(skipped)}")
+          if skipped:
+              ann('error', 'patches-skipped', '\n'.join(skipped[:25]))
+
+          pat = re.compile(r'error:|fatal error:|undefined symbol|Undefined symbols for '
+                           r'architecture|No such file or directory|\*\*\* \[|Undefined:')
+          errs = [l for l in log.splitlines() if pat.search(l)]
+          ann('error', 'build-errors', '\n'.join(errs[:80]) if errs else 'none matched')
+          PY
 
       - name: Package build tree for local compiles
         if: always()
