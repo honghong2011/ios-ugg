@@ -115,6 +115,27 @@ ugglite 也遇到同样问题，但误以为「闭源对象不能重编」而放
 它给内核只喂 **554 MiB**（而非全部 RAM），因为 `BOOTSTRAP_TABLE_SIZE` 只有 8 页。
 → **我们的 ADT 计划：dram-base `0x91600000`（2MiB 对齐、在 splash carve-out 之上）+ 512 MiB。**
 
+**6. run #4 的失败与修复（2026-11-08，0087 汇编错误 → 已修，`8be6da3`）。**
+0086-0088 三补丁全部干净应用（`applied=92 skipped=4`，92 = 上次 89 + 新增 3；跳过的 4 个仍是
+上游自带、给别的 macOS 版本的外来补丁，与 run #3 一致），但 `osfmk/arm64/start.s` 汇编报 12 条错，
+`start.o` 挂 → bootstrap 中断 → `out/` 无 kernel（注解 `kernel-missing` / `SHA256SUMS 0` 是结果不是原因）。
+
+12 条 = 3 组 × 4 条，正好对应我新加的三处 `ugg_mark_bar` 调用（x=600/617/634）→ **整次失败由这一个宏造成，
+与页表几何方案无关**。根因（已读源码确认）：
+
+- **宏声明了形参 `xoff, colour` 却用 `$0/$1` 位置引用。** 本树约定：位置引用只用于**无参数表**的宏；
+  一旦有形参名就必须用 `\name`（`cswitch.s` 的 `\cpudatap`、`machine_routines_asm.s` 的 `\end_addr` 是 `\` 风格）。
+  同文件 `create_l0_table_entry` 就是「无参表 + `$0..$5`」，本次构建中被调用两次且零报错 —— **这是该约定的现成反证**。
+  于是 `$0/$1` 未替换，字面量进了指令：`add x0, x0, $0` → `expected compatible register, symbol or integer in range [0, 4095]`；
+  `MOV32 w1, $1` 展开后立即数表达式含未定义符号 → `immediate must be an integer in range [0, 65535]`。
+- **顺带查出第二个独立缺陷**：`add x0, x0, $0, lsl #1` 本身也非法 —— AArch64 的 ADD(立即数) 只允许 `lsl #0/#12`，
+  没有 `lsl #1`。原意是 `x0 += 3*xoff`，改为一条常量加法 `add x0, x0, #(3 * $0)`。
+
+修法：去掉宏参数表、保留 `$0/$1`（与 `create_l0_table_entry` 对齐），并同步修正因减少一行而偏移的后续 hunk 头。
+洁净室复验：从纯净 tag `xnu-8796.141.3` 起应用全链，**86/88 干净通过**（仅 0031/0041 两个 hfs 相关的已知失败），
+补丁为规范 diff、无 CRLF。**注意：本次在 start.o 中断，0086(proc_reg.h) 与 0088(arm_vm_init.c) 的 C 代码还没轮到编译，
+下一次绿了才是它们的首次编译验证。**
+
 ### >>> 以下为 2026-11-01 的历史 handoff <<<
 
 ## Agent handoff / active work (2026-11-01)
