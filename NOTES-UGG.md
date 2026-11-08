@@ -136,6 +136,44 @@ ugglite 也遇到同样问题，但误以为「闭源对象不能重编」而放
 补丁为规范 diff、无 CRLF。**注意：本次在 start.o 中断，0086(proc_reg.h) 与 0088(arm_vm_init.c) 的 C 代码还没轮到编译，
 下一次绿了才是它们的首次编译验证。**
 
+**7. M1（内核上机）进展：shim/tools/ADT 已按最简方案做完，只差一次 shim 产物下载。**
+目标：让内核在真机上跑起来（U2 的第一步）。做法是**直接抄 uglite 的 U2 shim**（它已在同家族真机跑到
+`arm_vm_init`），来源 `E:\ios-ugg\ugglite\shim\`，加一个 `BOARD_UGG` 分支。
+
+**决定性事实（uglite 实测，直接沿用）**：这条 LK **不把 payload 放到 boot header 的 ramdisk_addr**，
+也不在 `/chosen` 报 initrd。它可靠地解压 kernel 并连续落盘，所以 payload 必须**追加在未压缩 Image 之后**，
+shim 从自己 `_end` 往高地址按 16K 步长扫 magic（`loader.c: sweet_payload_addr()`）。
+另：**DTB bundle 必需**（raw Image → `dtb not found` 或死挂），LK 按 `qcom,msm-id/qcom,board-id`
+选一个 DTB 放进 x0；U1 已确认 LK 把 DTB 传进来了。
+
+已改完（commit `0d3a711` + `2a10fb7`）：
+- `shim/board.h`（新，抄 uglite）：`BOARD_UGG` 分支，常量取自 **ugg 真机 DT**（`device-dumps/dt`，
+  "MSM8940-PMI8937 MTP"）：GICv2 `qcom,msm-qgic2` GICD 0xb000000/GICC 0xb002000、splash
+  0x90000000+0x1400000（720x1280 RGB888，2160 字节/行）、CNTV INTID 20、PSHOLD 0x4ab000、
+  IMEM restart_reason 0x860065c。
+- `shim/{shim.c,loader.c,mmu.c,fdt.c,console.*,probe.c,ufs.c}`：抄 uglite；`loader.c`/`mmu.c` 的
+  `BOARD_UGGLITE` 条件扩为 `|| defined(BOARD_UGG)`；`BOOT_PAGE=4K`、`v_depth=FB_BPP*8=24`。
+- `shim/build.sh`：改为只产 `shim/out/Image`（CI 用交叉编译器编，产物 196608 字节）。
+- `tools/mkpayload.py`：抄 uglite 的 `adt_page_and_block()`——GICv2 板 = 4K 页/2MB L2 块，
+  GICv3 = 16K/32MB；`virt_base` 原硬编码 32MB 对齐是 ugg 上的**真错**（应 2MB）。
+- `tools/mkadt.py`：新增 `--ugg`（GICv2 节点、8 核真实 MPIDR 0x0-3/0x100-103、boot 核 **0x100 = running**、
+  `dram-base 0x91600000 + 512MiB`、24bpp fbcon 720x1280 stride 2160、无 pram/无 UFS）。已逐字段核对。
+- `tools/pack-ugg.py`：新增 `--payload`（payload 追加到 Image、16K 对齐、写 arm64 头的
+  `text_offset`(off 8) 与 `image_size`(off 16)）；`--ramdisk` 可选。
+- `tools/mkuggboot.py`（新）：本地一条命令组装最终 boot image（shim + payload + gzip + DTB bundle + v0 头）。
+- `.github/workflows/shim-ugg.yml`：只编译 shim + 校验 `out/Image`；编译错误写注解。
+
+**本地已验证**（用假 shim 跑通组装链）：boot image 8.16MB（<768MB 限制）、v0/2048、
+gzip 流后跟 DTB bundle、解压 16787936 = shim 196608 + payload 16591328、`image_size==text_offset==len`、
+payload magic `SWEETXNU` 落在 0x30000。产物在 `E:\ios-ugg\build-m1\`（payload.bin / ugg.adt / 空 ramdisk）。
+
+**卡点**：本机无 aarch64 编译器，shim 只能 CI 编；**产物下载需登录**（匿名 401），所以真 shim Image
+要用户从网页下 `shim-ugg` artifact（10KB）。拿到后一条命令即出最终 `shim-boot.img`，然后 `fastboot boot`。
+
+**M1 剩余**（上机后按实际挂点补）：A2 `SweetCPU.cpp` 的拓扑校验（`phys_id & 0xff != 0` 会 panic，
+ugg 是双簇 Aff0=0-3；且它要求 boot phys_id==0，而 ugg boot 核是 0x100）；A4 若卡在 `arm_vm_init`
+内部则加细分 early marker（uglite 在这一段卡过）。
+
 ### >>> 以下为 2026-11-01 的历史 handoff <<<
 
 ## Agent handoff / active work (2026-11-01)
