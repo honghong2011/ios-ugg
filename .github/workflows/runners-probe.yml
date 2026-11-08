@@ -1,10 +1,9 @@
 name: runners-probe
 
 # Throwaway diagnostic: which GitHub-hosted macOS images can this
-# repository actually provision? Each unavailable label is cancelled
-# within ~1s (runner_id 0), available ones run the tiny probe below.
-# Candidate set is limited to free public-repo images on purpose:
-# no -large / -xlarge (those are billed).
+# repository provision, and which Xcode versions do they carry?
+# Results are reported as check-run annotations because job logs
+# require admin rights on the repo.
 on:
   push:
     branches: [ci-probe]
@@ -15,14 +14,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14, macos-15, macos-15-intel, ubuntu-24.04]
+        os: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Report
         run: |
-          echo "label=${{ matrix.os }}"
-          uname -a
-          sw_vers 2>/dev/null || true
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
-          xcodebuild -version 2>/dev/null || true
-          xcrun --find iig 2>/dev/null || echo "no iig"
+          arch=$(uname -m)
+          ver=$(sw_vers -productVersion 2>/dev/null || echo '?')
+          xcs=$(ls -d /Applications/Xcode*.app 2>/dev/null | sed 's#/Applications/##' | tr '\n' ',' )
+          def=$(xcodebuild -version 2>/dev/null | head -1 || echo none)
+          iig=$(xcrun --find iig 2>/dev/null || echo none)
+          echo "arch=$arch macos=$ver xcodes=[$xcs] default=[$def] iig=[$iig]"
+          echo "::warning title=probe-${{ matrix.os }}::arch=$arch macos=$ver xcodes=[$xcs] default=[$def] iig=[$iig]"
