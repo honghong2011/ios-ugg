@@ -2,7 +2,7 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index 27c5460..7350b75 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -425,6 +425,78 @@ start_cpu:
+@@ -425,6 +425,77 @@ start_cpu:
  	str		$5, [$3]							// Write entry to L1 table
  .endmacro
  
@@ -54,10 +54,9 @@ index 27c5460..7350b75 100644
 + * Clobbers x0-x6. In particular it must not run between the two
 + * create_bootstrap_mapping calls, where x14/x15 hold the KVA cursors.
 + */
-+.macro ugg_mark_bar xoff, colour
++.macro ugg_mark_bar
 +	MOV64	x0, (0x90000000 + 2160 * 1248)
-+	add		x0, x0, $0, lsl #1
-+	add		x0, x0, $0						// x0 += 3 * xoff: bytes per pixel
++	add		x0, x0, #(3 * $0)				// x0 += 3 * xoff bytes: three bytes per pixel
 +	MOV32	w1, $1
 +	mov		x2, #32							// rows
 +	mov		x4, #2160						// row stride in bytes
@@ -81,7 +80,7 @@ index 27c5460..7350b75 100644
  /*
   * create_l2_block_entries
   *
-@@ -524,7 +596,15 @@ LEXT(start_first_cpu)
+@@ -524,7 +595,15 @@ LEXT(start_first_cpu)
  	mov		x21, #0
  
  #if defined(SWEET)
@@ -98,7 +97,7 @@ index 27c5460..7350b75 100644
  	MOV64	x0, (0x9c000000 + 2368 * 4320)
  	mov		w1, #-1
  	mov		x2, #32
-@@ -540,7 +620,8 @@ Lsweet_mark_pixel:
+@@ -540,7 +619,8 @@ Lsweet_mark_pixel:
  	subs	x2, x2, #1
  	b.ne	Lsweet_mark_row
  	dsb		sy
@@ -108,7 +107,7 @@ index 27c5460..7350b75 100644
  
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
-@@ -604,7 +685,11 @@ Lsweet_mark_pixel:
+@@ -604,7 +684,11 @@ Lsweet_mark_pixel:
  	mov		x0, #(ARM_TTE_EMPTY)				// Load invalid entry template
  	mov		x1, x25								// Start at V=P pagetable root
  	mov		x2, #(TTE_PGENTRIES)				// Load number of entries per page
@@ -120,7 +119,7 @@ index 27c5460..7350b75 100644
  
  Linvalidate_bootstrap:							// do {
  	str		x0, [x1], #(1 << TTE_SHIFT)			//   Invalidate and advance
-@@ -663,39 +748,89 @@ Lkernelcache_base_found:
+@@ -663,39 +747,89 @@ Lkernelcache_base_found:
  	mov		x15, x23
  
  	/*
@@ -223,7 +222,7 @@ index 27c5460..7350b75 100644
  	MOV64	x10, 0x9c000000
  	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
  	orr		x11, x11, x10
-@@ -703,7 +838,13 @@ Lkernelcache_base_found:
+@@ -703,7 +837,13 @@ Lkernelcache_base_found:
  	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
  	add		x13, x25, #(2 * PGBYTES)
  	str		x11, [x13, x12, lsl #TTE_SHIFT]
@@ -237,7 +236,7 @@ index 27c5460..7350b75 100644
  
  	/* Ensure TTEs are visible */
  	dsb		ish
-@@ -743,7 +884,7 @@ common_start:
+@@ -743,7 +883,7 @@ common_start:
  
  	/* Set up translation table base registers.
  	 *	TTBR0 - V=P table @ top of kernel
@@ -246,7 +245,7 @@ index 27c5460..7350b75 100644
  	 */
  #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
  	/* Note that for KTRR configurations, the V=P map will be modified by
-@@ -754,7 +895,11 @@ common_start:
+@@ -754,7 +894,11 @@ common_start:
  	mov		x19, lr
  	bl		EXT(set_mmu_ttb)
  	mov		lr, x19
@@ -258,7 +257,7 @@ index 27c5460..7350b75 100644
  	and		x0, x0, #(TTBR_BADDR_MASK)
  	MSR_TTBR1_EL1_X0
  
-@@ -847,6 +992,17 @@ common_start:
+@@ -847,6 +991,17 @@ common_start:
  	MSR_SCTLR_EL1_X0
  	isb		sy
  
