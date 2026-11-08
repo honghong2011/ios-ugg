@@ -88,7 +88,7 @@ jobs:
         if: always()
         run: |
           python3 - <<'PY'
-          import re
+          import os, re, hashlib
           try:
               log = open('build.log', errors='replace').read()
           except OSError as exc:
@@ -102,14 +102,72 @@ jobs:
           applied = re.findall(r'Applying patch: (\S+)', log)
           skipped = re.findall(r'Skipping patch (\S+)[^\n]*', log)
           ann('notice', 'patch-report', f"applied={len(applied)} skipped={len(skipped)}")
-          if skipped:
-              ann('error', 'patches-skipped', '\n'.join(skipped[:25]))
+
+          # darwin-xnu-build ships patches for every macOS release and applies
+          # them all; the ones that do not fit 13.5 are expected to be skipped.
+          # Only our own numbered chain (0NNN-*.patch) skipping is a failure.
+          ours_skipped = [s for s in skipped if re.search(r'/\d{4}-', s)]
+          other_skipped = [s for s in skipped if s not in ours_skipped]
+          if ours_skipped:
+              ann('error', 'patches-skipped', '\n'.join(ours_skipped[:25]))
+          if other_skipped:
+              ann('notice', 'patches-skipped-foreign', '\n'.join(other_skipped[:25]))
 
           pat = re.compile(r'error:|fatal error:|undefined symbol|Undefined symbols for '
                            r'architecture|No such file or directory|\*\*\* \[|Undefined:')
           errs = [l for l in log.splitlines() if pat.search(l)]
           ann('error', 'build-errors', '\n'.join(errs[:80]) if errs else 'none matched')
           PY
+
+      - name: Report artifact inventory as annotations
+        # Runs after Collect, and exists because the artifacts themselves need
+        # a GitHub login to download: this is the only anonymous proof of what
+        # was built, and of whether MACHINE_CONFIG=UGG drove it.
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, re, hashlib
+
+          def ann(kind, title, body):
+              esc = (body.replace('%', '%25').replace('\r', '').replace('\n', '%0A'))
+              print(f"::{kind} title={title}::{esc[:60000]}")
+
+          try:
+              names = sorted(os.listdir('out'))
+          except OSError as exc:
+              ann('warning', 'artifact-scan', str(exc))
+              raise SystemExit(0)
+
+          lines = [f"{n} {os.path.getsize(os.path.join('out', n))}"
+                   for n in names if os.path.isfile(os.path.join('out', n))]
+          ann('notice', 'artifact-files', '\n'.join(lines) or '(out/ is empty)')
+
+          kernel = next((os.path.join('out', n) for n in names
+                         if n.startswith('kernel.') and not n.endswith('.unstripped')), None)
+          if not kernel:
+              ann('error', 'kernel-missing', 'no kernel.* in out/')
+              raise SystemExit(0)
+
+          h = hashlib.sha256()
+          with open(kernel, 'rb') as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b''):
+                  h.update(chunk)
+          ann('notice', 'kernel-sha256',
+              f"{os.path.basename(kernel)} {os.path.getsize(kernel)} {h.hexdigest()}")
+
+          with open(kernel, 'rb') as fh:
+              blob = fh.read()
+          # The object path encodes the machine config, so this says whether
+          # -DARM64_BOARD_CONFIG_UGG actually drove the build.
+          seen = sorted(set(re.findall(rb'ARM64_[A-Z0-9_]+', blob)))
+          ann('notice', 'kernel-machine-configs', ' '.join(s.decode() for s in seen[:20]))
+          marks = [s.decode() for s in
+                   (b'sweet_gic_ack', b'sweet_gic_eoi', b'sweet_gic_send_sgi',
+                    b'sweet_early_mark', b'sweet_early_panic', b'ARM64_BOARD_CONFIG_UGG')
+                   if s in blob]
+          ann('notice', 'kernel-ugg-symbols', ' '.join(marks) or '(none found)')
+          PY
+
 
       - name: Package build tree for local compiles
         if: always()
