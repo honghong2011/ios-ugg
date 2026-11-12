@@ -75,6 +75,38 @@
 - 左下角应出现 `stkXXXX`（剩余栈 ÷18 的十六进制）：`stk0e29` = 65,264 B 剩；
 - 若仍有故障 → 这次是**真**故障，`pc/lr/sp/esr/far` 齐全且只报一条。
 
+## 交付物：0092（当前最新，可直接 fastboot boot，2026-11-13）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `build-m1/diag2/shim-boot-0092-faultsafe.img` |
+| 大小 | 8,151,040 B |
+| sha256 | `7c9aa5613feb5c3dfb2652c447a486408c029372309dbdb438c3838c04142a5b` |
+| 内核 | `ci-xnu10/kernel.development.ugg`，17,301,656 B，sha256 `264250a9...4fcabaa1` |
+| 来源 CI | run `43237805476`（`08ba29f`）**success** |
+| 构造脚本 | `build-m1/mk0092.py` |
+
+**用法（RAM-only，不刷任何分区）**：
+
+`
+fastboot boot build-m1/diag2/shim-boot-0092-faultsafe.img
+`
+
+**已在二进制里验证（事实）**：
+
+- `_sweet_early_mark` 中 `mrs SP_EL0` 计数 = **0**（0091 里是 1，正是故障指令 `d5384114`）。
+- shim 代码区 [32:196608] 与 0091、与 `shim-Image-CI.bin` **逐字节相同**，
+  头部唯一差异字节为 0 —— 这次连长度字段都没变（两版内核大小相同）。
+- 镜像**确定性可复现**：连续构建两次 sha256 一致。
+
+**这次预期看到**：
+
+| 现象 | 判断 |
+|---|---|
+| 无 `SWEET FAULT`，标记递增到 13+ | **M1 通过，可进 M2** |
+| 左下角出现 `stkXXXX` | 剩余启动栈 ÷18；`stk0e29` = 65,264 B |
+| 仍有一条 `SWEET FAULT` | 真故障，`pc/lr/sp/esr/far` 齐全，继续修 |
+
 ## 交付物：可以直接 fastboot boot 的镜像（2026-11-12）
 
 | 项 | 值 |
