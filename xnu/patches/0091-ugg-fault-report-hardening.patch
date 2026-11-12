@@ -1,0 +1,185 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -28,6 +28,24 @@
+ #define EARLY_CELL_H (16u * EARLY_SCALE)
+ #define EARLY_ROWS ((EARLY_HEIGHT - 32u) / EARLY_CELL_H)
+ #define EARLY_COLS (EARLY_WIDTH / EARLY_CELL_W)
++/*
++ * Row EARLY_ROWS - 1 is reserved for the stack gauge. Scrolling text must stop
++ * one row short of it: the first gauge attempt shared row 38 with the console,
++ * and the last printed line overwrote the reading every time, so the numbers
++ * never appeared on the panel.
++ */
++#define EARLY_TEXT_ROWS (EARLY_ROWS - 1u)
++#define EARLY_GAUGE_ROW (EARLY_ROWS - 1u)
++/*
++ * Leave the first character cell blank. The phone's active area starts at the
++ * panel edge, so text drawn in column 0 is cut in half by the bezel; the 0090
++ * photograph lost the leading characters of several register lines that way
++ * ("00000" appeared as "30000"), which made the printed addresses ambiguous.
++ * One blank column costs nothing and every value becomes readable.
++ */
++#define EARLY_LEFT_MARGIN 1u
++/* Columns actually usable for text once the left margin is taken. */
++#define EARLY_TEXT_COLS (EARLY_COLS - EARLY_LEFT_MARGIN)
+ 
+ /*
+  * Bring-up marker geometry. The marker band lives in the bottom 32 rows,
+@@ -106,40 +124,34 @@
+ sweet_early_stackgauge(void)
+ {
+ 	static const char label[] = "stk";
++	static const char digits[] = "0123456789abcdef";
+ 	uintptr_t free_bytes = sweet_early_stackfree();
+ 
++	for (unsigned int i = 0; i < 4; i++) {
++		sweet_early_glyph(i + EARLY_LEFT_MARGIN, EARLY_GAUGE_ROW, label[i]);
++	}
+ 	if (free_bytes == 0) {
+-		return;         /* on a thread stack now: not our business */
+-	}
+-	for (unsigned int i = 0; i < 4; i++) {
+-		sweet_early_glyph(i, EARLY_ROWS - 1, label[i]);
++		/*
++		 * SP_EL0 is not inside the boot interrupt stack. Painting "????"
++		 * rather than nothing matters: a blank gauge is indistinguishable
++		 * from a gauge that never ran, and that ambiguity cost a round.
++		 */
++		for (unsigned int i = 0; i < 4; i++) {
++			sweet_early_glyph(4 + i + EARLY_LEFT_MARGIN, EARLY_GAUGE_ROW, '?');
++		}
++		return;
+ 	}
+ 	/* 18 free bytes per unit, drawn as 4 hex digits: "stk0400" == 16 KiB. */
+ 	unsigned int units = (unsigned int)(free_bytes / 18u);
+-	static const char digits[] = "0123456789abcdef";
+ 	for (unsigned int i = 0; i < 4; i++) {
+-		sweet_early_glyph(4 + i, EARLY_ROWS - 1,
++		sweet_early_glyph(4 + i + EARLY_LEFT_MARGIN, EARLY_GAUGE_ROW,
+ 		    digits[(units >> (12 - 4 * i)) & 0xf]);
+ 	}
+-}
+-
+-/*
+- * Full reading, for the fault report only: a whole line is affordable once,
+- * because nothing follows it.
+- */
+-static void
+-sweet_early_stackinfo(void)
+-{
+-	sweet_early_vprint("  el0 %016llx ibase %016llx itop %016llx free %016llx\n",
+-	    (unsigned long long)sweet_early_sp_el0(),
+-	    (unsigned long long)(uintptr_t)intstack,
+-	    (unsigned long long)(uintptr_t)intstack_top,
+-	    (unsigned long long)sweet_early_stackfree());
+ }
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+-static unsigned int early_started, early_disabled, early_panicking;
++static unsigned int early_started, early_disabled, early_panicking, early_fault_reported;
+ 
+ static void
+ sweet_early_clear_row(void)
+@@ -203,15 +215,15 @@
+ 		} while (early_col & 3u);
+ 		return;
+ 	}
+-	if (c == '\n' || early_col == EARLY_COLS) {
++	if (c == '\n' || early_col >= EARLY_TEXT_COLS) {
+ 		early_col = 0;
+-		early_row = (early_row + 1) % EARLY_ROWS;
++		early_row = (early_row + 1) % EARLY_TEXT_ROWS;
+ 		sweet_early_clear_row();
+ 		if (c == '\n') {
+ 			return;
+ 		}
+ 	}
+-	sweet_early_glyph(early_col, early_row, c);
++	sweet_early_glyph(early_col + EARLY_LEFT_MARGIN, early_row, c);
+ 	early_col++;
+ }
+ 
+@@ -269,21 +281,72 @@
+  * panic() then is the misleading "Invalid kernel stack pointer", and the real
+  * fault is lost. Printing the pc/esr/far here names it.
+  */
++/*
++ * Print one 64-bit value with no varargs, no _doprnt and no register reads.
++ *
++ * The fault reporter MUST NOT depend on anything that can fault again. The
++ * first version called sweet_early_vprint() (which pulls in _doprnt) and then
++ * read SP_EL0 to describe the boot stack; on 0090 the panel filled with
++ * hundreds of "SWEET FAULT sync" blocks whose pc sat at _sweet_early_fault
++ * + 0x140, i.e. the reporter itself was the thing faulting, each pass pushing
++ * another ~1216-byte frame onto the same stack and re-faulting. That loop hid
++ * the real fault it was supposed to reveal.
++ */
++static void
++sweet_early_hex64(uint64_t v)
++{
++	static const char digits[] = "0123456789abcdef";
++
++	for (int shift = 60; shift >= 0; shift -= 4) {
++		sweet_early_putc(digits[(v >> shift) & 0xf]);
++	}
++}
++
++static void
++sweet_early_hex32(uint32_t v)
++{
++	static const char digits[] = "0123456789abcdef";
++
++	for (int shift = 28; shift >= 0; shift -= 4) {
++		sweet_early_putc(digits[(v >> shift) & 0xf]);
++	}
++}
++
+ void
+ sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
+     uint32_t esr, uint64_t far)
+ {
+-	if (early_disabled) {
+-		return;
+-	}
++	/*
++	 * Report exactly one fault. A second one means this reporter (or the
++	 * handler around it) is itself broken, and looping on it buries the
++	 * information we are trying to print instead of reporting it.
++	 */
++	if (early_disabled || early_fault_reported) {
++		return;
++	}
++	early_fault_reported = 1;
++
+ 	sweet_early_string("\nSWEET FAULT ");
+ 	sweet_early_string(tag);
+-	sweet_early_vprint("\n pc %016llx  lr %016llx"
+-	    "\n sp %016llx  esr %08x  far %016llx\n",
+-	    (unsigned long long)pc, (unsigned long long)lr,
+-	    (unsigned long long)sp, (unsigned int)esr, (unsigned long long)far);
+-	sweet_early_string(" istack:");
+-	sweet_early_stackinfo();
++	sweet_early_string("\n pc ");
++	sweet_early_hex64(pc);
++	sweet_early_string(" lr ");
++	sweet_early_hex64(lr);
++	sweet_early_string("\n sp ");
++	sweet_early_hex64(sp);
++	sweet_early_string(" esr ");
++	sweet_early_hex32(esr);
++	sweet_early_string("\n far ");
++	sweet_early_hex64(far);
++	sweet_early_putc('\n');
++	/*
++	 * Deliberately NOT calling sweet_early_stackgauge() here. It reads SP_EL0,
++	 * and the 0090 panel showed the reporter faulting with pc exactly on
++	 * "mrs x10, SP_EL0", esr 0x02000000 (EC 0, unknown reason). The gauge is
++	 * painted by every stage marker already, so the last reading is still on
++	 * the panel without touching a system register from an exception handler
++	 * that may be running on an already broken stack.
++	 */
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
