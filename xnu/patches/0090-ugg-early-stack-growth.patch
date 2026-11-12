@@ -50,11 +50,10 @@ index c013288..b7c2a15 100644
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
-@@ -57,6 +57,70 @@
- }
+@@ -58,6 +58,85 @@
  
  extern unsigned char iso_font[256 * 16];
-+
+ 
 +/*
 + * Boot stack bounds from __BOOTDATA (osfmk/arm/data.s). arm_init() runs on
 + * SP_EL0 == &intstack_top and every synchronous exception taken from SP_EL0 is
@@ -64,6 +63,7 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +extern uint8_t intstack[];
 +extern uint8_t intstack_top[];
 +
++static void sweet_early_glyph(unsigned int col, unsigned int row, char c);
 +static void sweet_early_vprint(const char *fmt, ...);
 +
 +static uintptr_t
@@ -89,25 +89,39 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +}
 +
 +/*
-+ * Four hex digits without _doprnt: this is reachable from the handler that has
-+ * already run out of stack, and doprnt would need a few hundred bytes of the
-+ * very resource being measured.
++ * Boot-stack gauge, painted at a FIXED character cell (last row, column 0).
++ *
++ * Appending the value to each stage label was the obvious approach and it is
++ * wrong on this panel: the console is 45 columns wide and appending " stkXXXX"
++ * pushes 11 of the 20 stage lines onto a second row, so the 39-row ring starts
++ * scrolling and the earliest markers disappear exactly when they are needed.
++ * A fixed cell never scrolls and never costs a row, so the ladder and the gauge
++ * are both intact. Painted only when the stack is still the boot stack.
 + */
 +static void
-+sweet_early_hex4(unsigned int v)
++sweet_early_stackgauge(void)
 +{
-+	static const char digits[] = "0123456789abcdef";
++	static const char label[] = "stk";
++	uintptr_t free_bytes = sweet_early_stackfree();
 +
-+	sweet_early_putc(digits[(v >> 12) & 0xf]);
-+	sweet_early_putc(digits[(v >> 8) & 0xf]);
-+	sweet_early_putc(digits[(v >> 4) & 0xf]);
-+	sweet_early_putc(digits[v & 0xf]);
++	if (free_bytes == 0) {
++		return;         /* on a thread stack now: not our business */
++	}
++	for (unsigned int i = 0; i < 4; i++) {
++		sweet_early_glyph(i, EARLY_ROWS - 1, label[i]);
++	}
++	/* 18 free bytes per unit, drawn as 4 hex digits: "stk0400" == 16 KiB. */
++	unsigned int units = (unsigned int)(free_bytes / 18u);
++	static const char digits[] = "0123456789abcdef";
++	for (unsigned int i = 0; i < 4; i++) {
++		sweet_early_glyph(4 + i, EARLY_ROWS - 1,
++		    digits[(units >> (12 - 4 * i)) & 0xf]);
++	}
 +}
 +
 +/*
-+ * Full reading, for the fault report only. Stage markers use the compact form
-+ * in sweet_early_mark() instead: a second line per marker would wrap the
-+ * 39-row screen ring and scroll the early ladder off before the fault prints.
++ * Full reading, for the fault report only: a whole line is affordable once,
++ * because nothing follows it.
 + */
 +static void
 +sweet_early_stackinfo(void)
@@ -118,20 +132,73 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +	    (unsigned long long)(uintptr_t)intstack_top,
 +	    (unsigned long long)sweet_early_stackfree());
 +}
- 
++
  /* Initialized data must remain writable until disable, including panics. */
  static unsigned int early_row, early_col;
-@@ -156,6 +220,9 @@
- 	sweet_early_putc((char)('0' + stage % 10));
- 	sweet_early_string(": ");
- 	sweet_early_string(label);
-+	/* free boot stack in 16-byte units, e.g. "stk0400" == 16 KiB free */
-+	sweet_early_string(" stk");
-+	sweet_early_hex4((unsigned int)(sweet_early_stackfree() >> 4));
- 	sweet_early_putc('\n');
+ static unsigned int early_started, early_disabled, early_panicking;
+@@ -69,6 +148,31 @@
+ 		volatile uint8_t *line = EARLY_FB + (early_row * EARLY_CELL_H + y) * EARLY_STRIDE;
+ 		for (unsigned int x = 0; x < EARLY_WIDTH; x++) {
+ 			sweet_early_pixel(line, x, 0xff000000u);
++		}
++	}
++}
++
++/*
++ * Draw one iso_font glyph at an absolute character cell. Split out of
++ * sweet_early_putc() so the stack gauge can be painted at a fixed cell instead
++ * of advancing the scrolling cursor.
++ */
++static void
++sweet_early_glyph(unsigned int col, unsigned int row, char c)
++{
++	const unsigned char *glyph = iso_font + (unsigned char)c * 16;
++
++	for (unsigned int gy = 0; gy < 16; gy++) {
++		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
++			volatile uint8_t *line = EARLY_FB +
++			    (row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * EARLY_STRIDE;
++			for (unsigned int gx = 0; gx < 8; gx++) {
++				uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
++				for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
++					sweet_early_pixel(line, col * EARLY_CELL_W +
++					    gx * EARLY_SCALE + sx, pixel);
++				}
++			}
+ 		}
+ 	}
+ }
+@@ -107,20 +211,7 @@
+ 			return;
+ 		}
+ 	}
+-	const unsigned char *glyph = iso_font + (unsigned char)c * 16;
+-	for (unsigned int gy = 0; gy < 16; gy++) {
+-		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
+-			volatile uint8_t *line = EARLY_FB +
+-			    (early_row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * EARLY_STRIDE;
+-			for (unsigned int gx = 0; gx < 8; gx++) {
+-				uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
+-				for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
+-					sweet_early_pixel(line, early_col * EARLY_CELL_W +
+-					    gx * EARLY_SCALE + sx, pixel);
+-				}
+-			}
+-		}
+-	}
++	sweet_early_glyph(early_col, early_row, c);
+ 	early_col++;
  }
  
-@@ -190,6 +257,8 @@
+@@ -157,6 +248,7 @@
+ 	sweet_early_string(": ");
+ 	sweet_early_string(label);
+ 	sweet_early_putc('\n');
++	sweet_early_stackgauge();
+ }
+ 
+ static void
+@@ -190,6 +282,8 @@
  	    "\n sp %016llx  esr %08x  far %016llx\n",
  	    (unsigned long long)pc, (unsigned long long)lr,
  	    (unsigned long long)sp, (unsigned int)esr, (unsigned long long)far);
