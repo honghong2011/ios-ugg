@@ -82,6 +82,43 @@ EC 0x25/0x26 的 bit31 都为 1，正是「可能栈坏」的那两类。本次 
 - 若 64 KiB 够用 → 标记 13/14 应出现，M1 前进；
 - 若仍不够 → 说明链里有远超预期的栈消耗，按 `stk` 实测定位到具体函数再修。
 
+## 交付物：可以直接 fastboot boot 的镜像（2026-11-12）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `build-m1/diag2/shim-boot-0090-stack64k.img` |
+| 大小 | 8,151,040 B |
+| sha256 | `46577dfe3fcd9a23d0681247d2c1cfefc62df85e4fc7d405bad244a8f1153579` |
+| 内核 | `ci-xnu8/kernel.development.ugg`，17,301,624 B，sha256 `86d8963a823bb76f56b1fc7e40024cc3d2cf7c4137f860b90361ae9ba7431647` |
+| 来源 CI | run `43178792316`（`c93bebd`）**success** |
+| 构造脚本 | `build-m1/mk0090b.py`（复现：`python build-m1/mk0090b.py`） |
+
+**用法（RAM-only，不刷任何分区）**：
+
+`
+fastboot boot build-m1/diag2/shim-boot-0090-stack64k.img
+`
+
+与 A/B 那两张屏摄用的是同一条链路、同一个 shim、同一份 ADT 形状
+（dram-base 0x91600000 / 512 MiB），只有内核从 0089 换成 0090。
+
+**已在二进制里逐符号验证（事实）**：从 ci-xnu8 内核符号表读出
+`_intstack 0xfffffe00080b0000` / `_intstack_top 0xfffffe00080c0000`，
+`INTSTACK size = 65536`、`EXCEPSTACK size = 65536`，
+即 **16 KiB → 64 KiB 确实生效**（0089 同一符号是 16384）。
+`__BOOTDATA` vmsize 从 `0x4c000` 变 `0x64000`，正好 +0x18000 = 98304，
+与按 `data.s` 布局手算的增量一致；各段 gap 全为 0。
+
+**下一轮读屏标准**：最后一行左下角固定位置会出现 `stkXXXX`
+（`剩余启动栈字节 ÷ 18` 的 4 位十六进制）：`stk0e38`=64 KiB 全空、
+`stk071c`=剩 32 KiB、`stk0024`=只剩 0.6 KiB。
+
+1. **标记 13（`pmap_bootstrap done`）出现** ⇒ M1 通过，可以进 M2。
+2. **仪表在某个标记处明显跳水** ⇒ 该标记之后的调用链是栈消耗大户。
+3. **仪表一路很高但仍 panic** ⇒ 成因判断错了，此时屏上有
+   `el0/ibase/itop/free` 整行可直接对账，不用猜。
+
+无论哪种，**这次都不要再改 ADT**：A/B 已证明 ADT 形状不是变量。
 ## Previous: 2026-11-07 及更早
 
 ### >>> U1 已在真机通过（700bfa6 镜像，用户实拍红屏报告）<<<
