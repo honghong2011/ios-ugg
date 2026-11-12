@@ -1,0 +1,120 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -88,20 +88,34 @@
+ static void sweet_early_glyph(unsigned int col, unsigned int row, char c);
+ static void sweet_early_vprint(const char *fmt, ...);
+ 
++/*
++ * Current stack pointer, WITHOUT touching any system register.
++ *
++ * This used to be "mrs %0, SP_EL0". On 0091 the panel showed that instruction
++ * faulting with esr 0x02000000 (EC 0, unknown reason), which is an
++ * undefined-instruction trap, at _sweet_early_mark+0x850 - the stack gauge.
++ * Every stage marker then died on its own gauge and the boot never got past
++ * marker 1.
++ *
++ * sweet_early_mark() and relatives are called from arm_init() with SPSel=0, so
++ * SP_EL0 and the sp register hold the same value there. Reading sp is a plain
++ * general-register move: it cannot trap, and it needs no special permissions.
++ * The value is therefore identical to what we wanted, with none of the risk.
++ */
+ static uintptr_t
+-sweet_early_sp_el0(void)
+-{
+-	uintptr_t el0;
+-
+-	__asm__ volatile("mrs %0, SP_EL0" : "=r"(el0));
+-	return el0;
++sweet_early_sp(void)
++{
++	uintptr_t sp;
++
++	__asm__ volatile("mov %0, sp" : "=r"(sp));
++	return sp;
+ }
+ 
+ /* Bytes of boot interrupt stack still unused below SP_EL0. */
+ static uintptr_t
+ sweet_early_stackfree(void)
+ {
+-	uintptr_t el0 = sweet_early_sp_el0();
++	uintptr_t el0 = sweet_early_sp();
+ 	uintptr_t base = (uintptr_t)intstack, top = (uintptr_t)intstack_top;
+ 
+ 	if (el0 < base || el0 > top) {
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -604,9 +604,9 @@
+ {
+ 	esr_exception_class_t  class   = ESR_EC(esr);
+ 	arm_saved_state_t    * state   = &context->ss;
+-	thread_t               thread  = current_thread();
++	thread_t               thread;
+ #if MACH_ASSERT
+-	int                    preemption_level = sleh_get_preemption_level();
++	int                    preemption_level;
+ #endif
+ 	expected_fault_handler_t expected_fault_handler = NULL;
+ #ifdef CONFIG_XNUPOST
+@@ -616,16 +616,26 @@
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * During early boot (arm_vm_init -> pmap_bootstrap) the stack belongs to no
+-	 * thread, so this handler's own prologue - task_vtimer_check ->
+-	 * current_thread -> get_threadtask_early - can fault before anything is
+-	 * reported, and the panic that follows misnames the real fault as an
+-	 * invalid kernel stack. Report the first fault here, where only the
+-	 * exception frame is needed.
++	 * Report BEFORE touching current_thread(), i.e. before any "mrs TPIDR_EL1".
++	 *
++	 * At the very start of arm_init() TPIDR_EL1 still holds 0, so
++	 * current_thread() returns NULL and the first dereference of it
++	 * (current_percpu_base() -> thread->machine.pcpu_data_base, offset 544)
++	 * raises a translation fault - observed on 0091 as pc at
++	 * _current_percpu_base+0xc / ldr x0,[x0,#544] with esr 0x96000005.
++	 * That secondary fault replaces the real report with a misleading
++	 * "Synchronous exception taken while SP1 selected" panic.
++	 *
++	 * This block must stay above every use of thread/preemption_level.
+ 	 */
+ 	sweet_early_fault("sync", get_saved_state_pc(state), get_saved_state_lr(state),
+ 	    get_saved_state_sp(state), esr, far);
+ #endif /* SWEET */
++
++	thread = current_thread();
++#if MACH_ASSERT
++	preemption_level = sleh_get_preemption_level();
++#endif
+ 
+ 	ASSERT_CONTEXT_SANITY(context);
+ 
+@@ -2136,19 +2146,25 @@
+ void
+ sleh_invalid_stack(arm_context_t *context, uint32_t esr __unused, vm_offset_t far __unused)
+ {
+-	thread_t thread = current_thread();
++	thread_t thread;
+ 	vm_offset_t kernel_stack_bottom, sp;
+ 
+ #if defined(SWEET)
+ 	/*
+ 	 * The stack this exception was taken on is not a thread stack, so the
+ 	 * panic below is a guess. Report what the hardware actually raised.
++	 *
++	 * Must run before current_thread(): early in boot TPIDR_EL1 is 0, and
++	 * dereferencing the resulting NULL thread faults again, destroying the
++	 * very report this hook exists to produce.
+ 	 */
+ 	sweet_early_fault("badstack", get_saved_state_pc(&context->ss),
+ 	    get_saved_state_lr(&context->ss), get_saved_state_sp(&context->ss),
+ 	    esr, far);
+ #endif /* SWEET */
+ 
++	thread = current_thread();
++
+ 	sp = get_saved_state_sp(&context->ss);
+ 	kernel_stack_bottom = round_page(thread->machine.kstackptr) - KERNEL_STACK_SIZE;
+ 
