@@ -1,8 +1,8 @@
 diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
-index c013288..5713c6e 100644
+index c013288..b7c2a15 100644
 --- a/osfmk/mach/arm/vm_param.h
 +++ b/osfmk/mach/arm/vm_param.h
-@@ -327,10 +327,37 @@ extern uint64_t                 gDramBase, gDramSize;
+@@ -327,10 +327,42 @@ extern uint64_t                 gDramBase, gDramSize;
  # define KERNEL_STACK_SIZE      (4*4096*KERNEL_STACK_MULTIPLIER)
  #endif /* XNU_KERNEL_PRIVATE */
  
@@ -17,16 +17,21 @@ index c013288..5713c6e 100644
 + * same 16 KiB a RELEASE kernel uses. Synchronous EL1 exceptions share it too:
 + * the EL1_SP0 vector reserves ARM_CONTEXT_SIZE (848) bytes before any C runs.
 + *
-+ * On UGG that overflows. The phone faulted with FAR 0xfffffe00080abfd0, ESR
-+ * 0x9600004f (data abort, write, permission fault level 3) and SP_EL0
-+ * 0xfffffe00080abf50: the chain's stack pointer had already descended 176
-+ * bytes past the bottom of intstack, and its next frame store landed in the
-+ * 16 KiB low guard page that arm_vm_init() maps read-only and no-execute.
-+ * CHECK_KERNEL_STACK detected this and panicked correctly - the guard page
-+ * turned a silent stack smash into a reported fault, at the cost of stopping
-+ * the boot. Give UGG a 4x early stack; these are per CPU and the memory is
-+ * negligible on a 4 GiB device. The assembly checks read INTSTACK_SIZE_NUM
-+ * from genassym, so they follow this constant automatically.
++ * On UGG that overflows. The phone faulted with FAR 0xfffffe00080abfd0 and
++ * ESR 0x9600004f (data abort, write, permission fault level 3). The saved
++ * state reports sp 0xfffffe00080abf50, which is the ARM_CONTEXT frame base as
++ * CHECK_KERNEL_STACK stores it (after its own sub sp, sp, #ARM_CONTEXT_SIZE),
++ * and far - sp is exactly 0x80, the offset of fleh_dispatch64's first stp.
++ * So SP_EL0 was 0xfffffe00080ac2a0 when the exception was taken: only 672
++ * bytes of the stack were still free, and framing the exception needed 848,
++ * leaving the frame 176 bytes past the bottom of intstack, inside the 16 KiB
++ * low guard page that arm_vm_init() maps read-only and no-execute. That is
++ * 95.9% of the stack already consumed before any fault was handled.
++ * CHECK_KERNEL_STACK then ran, found SP_EL0 below the stack, and panicked
++ * correctly: the guard page turned a silent stack smash into a reported
++ * fault, at the cost of stopping the boot. Give UGG a 4x early stack; these
++ * are per CPU and the memory is negligible on a 4 GiB device. The assembly
++ * checks read INTSTACK_SIZE_NUM from genassym, so they follow this constant.
 + */
 +#if defined(BOARD_UGG) || defined(BOARD_UGGLITE)
 +#define INTSTACK_SCALE          (4)
