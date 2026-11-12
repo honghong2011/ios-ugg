@@ -2,85 +2,78 @@
 
 > 本文件镜像上游 NOTES.md 的 handoff 规范：每次里程碑后更新最新 handoff，区分事实与猜测。
 
-## Agent handoff / active work (2026-11-12, latest)
+## Agent handoff / active work (2026-11-12 深夜, latest)
 
-### >>> M1 未通过，但故障已完全定位；0090 已推送并 CI 通过 <<<
+### >>> M1 仍未通过；0092 已推送、CI 通过，待真机验证 <<<
 
-**读这里：A/B 两臂同现象，排除了 ADT/dram-size 那条捷径；真正原因是启动中断栈被用光。**
-补丁 `0090-ugg-early-stack-growth.patch` 已提交并构建成功，等真机验证。
+**一句话：0089 的栈溢出已确认修好；0090/0091 暴露的两个「诊断代码自己炸」问题已在 0092 修掉。**
+现在的失败点是**我自己的仪俪代码读系统寄存器被拒**，不是内核逻辑。
 
-**1. 真机结果（0089 内核，用户两张屏摄）**
+**1. 0090 真机结果（用户屏摄）**
 
-- `build-m1/diag/shim-boot-a-512m.img`（dram-size 512 MiB）与
-  `shim-boot-b-1g25.img`（1280 MiB > 1 GiB）**输出逐字节相同**，
-  都是 `Sending OKAY` / `Booting OKAY` 后在同一个地方 panic。
-- ⇒ `arm_init.c` 里 `memSize > 1 GiB` 分支、16 KiB VM 页 / `PAGE_RATIO=4`
-  **不是**本故障原因。C（1.73 GiB）、D（base 0x92000000）两臂**不再跑**，
-  再改 ADT 试运气就是白烧 CI 轮次。
-- 标记 13（`pmap_bootstrap done`）两臂都没出现 ⇒ **M1 仍未通过，M2 = 0%**。
+- 旧的 `esr 9600004f`（写只读保护页）**完全消失** ⇒ 栈扩容生效。
+- 但屏上出现**几百块**重复 `SWEET FAULT sync`，每块都停在 `istack:` 后。
+- 定位：`pc` = `_sweet_early_fault+0x140`，指令是 `mrs x10, SP_EL0`；
+  `sp` 每轮下移 ~1216 字节（848 frame + 368 分发）⇒ **打印函数自己重入死循环**。
+- `esr 0x02000000` = EC 0（unknown reason）⇒ 异常处理已在半途又取异常。
+- 仪表没显示：它画在文本第 38 行，而滚动文字也用第 38 行，最后一行覆盖了它。**设计 bug**。
 
-**2. 故障定位（硬件值，算术自洽）**
+**2. 0091 做了什么（只动早期控制台）**
 
-```
-SWEET FAULT badstack
-  pc ffffffe000743dba4  lr ffffffe000743d5a4  sp fffffe00080abf50
-  esr 9600004f  far ffffffe00080abfd0
-```
+- 预留第 38 行给仪表，滚动只用前 38 行（`EARLY_TEXT_ROWS`）。
+- 仪表**总是**绘制，SP 不在启动栈时画 `????`。
+- `sweet_early_fault()` 去掉 `_doprnt`、只报一次（`early_fault_reported`）。
+- 加 `EARLY_LEFT_MARGIN`：首列留空（屏摄显示首列被边框切掉，`00000` 看成 `30000`）。
 
-| 事实 | 依据 |
-|---|---|
-| `pc = _sleh_synchronous+4`，指令是 `stp x28,x27,[sp,#0x80]`（一条**写**） | 反汇编 + 符号表 |
-| `far - sp = 0x80`，正好是该 stp 的偏移 ⇒ **sp 是 frame base** | 逐字对上 |
-| `ESR 0x9600004f` = data abort EL1 / WnR=1 / **permission fault level 3** | ESR 解码 |
-| `far` 落在 `[_intstack_low_guard, _intstack)`，该页被 `arm_page_granular_RNX` 设成只读 | 符号表 + `arm_vm_init.c:1462` |
+**3. 0091 真机结果（用户第二张屏摄）**
 
-**关键更正**：`ss.sp` **不是**被打断时的 SP。`CHECK_KERNEL_STACK` 的
-`Lcorrupt_stack` 路径在 `sub sp,sp,#ARM_CONTEXT_SIZE` **之后**才 `str SP_EL0`，
-存的是 frame base；正常 `EL1_SP0_VECTOR` 路径才存原始 SP。所以：
+- 防重入**成功**：屏上只有**一条** `SWEET FAULT`，不再是几百条。
+- 新故障 `pc ffffffe0007439f20` = `_sweet_early_mark+0x850`，机器码 `d5384114`
+  = **`mrs x20, SP_EL0`** ⇒ **仪表自己**在抓异常。启动连标记 1 都没过。
+- `sp ffffffe00080bfef0`，距 `_intstack_top` **272 字节**。
+  **注意方向**：栈向下长 ⇒ 只用了 272 字节、**剩 65264 字节（99.6% 空）**。
+  0089 那次 `sp` 在栈底**以下**，是真溢出；这次不是。**⇒ 0090 确实修好了溢出。**
+- 第二条 panic `Synchronous exception taken while SP1 selected`：
+  `pc` = `_current_percpu_base+0xc` = `ldr x0,[x0,#544]`，`esr 0x96000005`
+  （data abort EL1, DFSC 5 translation fault L1），`x10` = `0x220` = 544。
+  `current_thread_fast()` 就是 `mrs TPIDR_EL1`；**标记 1 时 TPIDR_EL1 还是 0**，
+  解引用 NULL+544 就翻译失败。⇒ **这是第一条故障的后果，不是独立 bug。**
 
-```
-被打断时 SP_EL0 = 0xfffffe00080abf50 + 0x350 = 0xfffffe00080ac2a0
-_intstack      = 0xfffffe00080ac000   _intstack_top = 0xfffffe00080b0000  (16 KiB)
-剩余 = 672 字节        异常入口需要 ARM_CONTEXT_SIZE = 848
-848 - 672 = 176  ⇒  frame 越过栈底 176 字节，落进只读保护页
-已用 15712 / 16384 = 95.9%
-```
+**4. 0092 做了什么**
 
-**3. 我早先的一个错误结论（已推翻，勿再引用）**
-
-曾认为 SP0 向量的 `tbz w1,#31`（机器码 `0x36f80561`）会跳过栈检查，
-把这条 panic 当误报。**错**，是我解码位域时算错位号：
-`b5=(w>>24)&1=0`、`b40=(w>>19)&0x1f=31` ⇒ 测试的是 ESR **bit 31 = 5+ESR_EC_SHIFT**。
-EC 0x25/0x26 的 bit31 都为 1，正是「可能栈坏」的那两类。本次 bit31=1，
-所以 `CHECK_KERNEL_STACK` **确实执行**、走进 `Lcorrupt_stack`，**panic 属实**。
-⇒ `locore.s` 没有缺陷，不需要改。
-
-**4. 0090 做了什么**
-
-- `osfmk/mach/arm/vm_param.h`：`INTSTACK_SIZE`/`EXCEPSTACK_SIZE` 对
-  `BOARD_UGG`/`BOARD_UGGLITE` 乘 4（16 → 64 KiB）。`KERNEL_STACK_SIZE`
-  早就为 KASAN/DEBUG 扩容，启动栈却没有。汇编侧读 genassym 的
-  `INTSTACK_SIZE_NUM`/`EXCEPSTACK_SIZE_NUM`，**自动跟随**。
-- `osfmk/arm64/sweet_early.c`：每个 `sweet_early_mark()` 行尾加 `stkXXXX`
-  （剩余启动栈 ÷16 的十六进制，`stk0400`=16 KiB）；故障报告多打一行
-  `el0/ibase/itop/free`。故障路径手写 hex、不用 `_doprnt`，因为它自己已快没栈。
+- `sweet_early.c`：`sweet_early_sp_el0()`（`mrs SP_EL0`）→ `sweet_early_sp()`（`mov %0, sp`）。
+  `sweet_early_mark()` 在 `arm_init()` 里跑，`SPSel=0`，所以 `sp` 与 `SP_EL0` **同值**，
+  而读 `sp` 是普通通用寄存器搬移，**不可能抛异常**。数值不变，风险归零。
+- `sleh.c`：`sleh_synchronous()` 与 `sleh_invalid_stack()` 原本在序言就先
+  `thread = current_thread()`，在 SWEET 报告**之前** ⇒ TPIDR_EL1=0 时先炸，
+  把真报告盖成误导性 panic。现改为**先打印、后取 thread**。
 
 **5. 交付物 / 复现**
 
 | 项 | 值 |
 |---|---|
-| commit | `384d673`（补丁）、`7ece0a9`（算术注释更正） |
-| CI run | `43165952502` `macos-15-intel` **success** |
-| patch-report | `applied=94 skipped=4`（4 条是 dxb 自带的上游补丁，长期如此） |
-| kernel | 17,317,968 B，sha256 `4106d3d2c1abd15336cbcab36c38c3a1dba5cefa1bee6901697f5ed12982621d` |
-| 补丁校验 | 对 0089 树 `git apply --check` 通过、逐字节复现改动、不可重复应用 |
+| commit | `eac43c7`(0091) `9d8669c`(notes) `08ba29f`(0092) |
+| CI run | `43218229183`(0091) `43237805476`(0092) 均 **success** |
+| patch-report | `applied=96 skipped=4`（4 条为外部 dxb 补丁） |
+| 0091 kernel | 17,301,656 B，sha256 `fa715f77...c9b3b1b0` |
+| 0092 kernel | 17,301,656 B，sha256 `264250a9...4fcabaa1` |
+| 0091 镜像 | `build-m1/diag2/shim-boot-0091-faulthardened.img` sha256 `2b22fb6b...7e20631` |
+| 0092 镜像 | `build-m1/diag2/shim-boot-0092-faultsafe.img`（见下） |
+| 补丁校验 | 0090→0091→0092 顺序应用逐字节复现；均不可重复应用 |
 
-**6. 下一步**
+**6. 审计结论（0092 顺带做的）**
 
-等手机接上，用 0090 内核做 `fastboot boot`（RAM-only，不刷机），
-看屏上 `stk` 从哪个标记开始明显变小：
-- 若 64 KiB 够用 → 标记 13/14 应出现，M1 前进；
-- 若仍不够 → 说明链里有远超预期的栈消耗，按 `stk` 实测定位到具体函数再修。
+对 0091 内核做全量系统寄存器扫描：早期路径（`sweet_early_*` + `arm_init`）里
+**只有一处**风险系统寄存器读取，就是 `_sweet_early_mark+0x850` 的 `mrs x20, SP_EL0`，
+**已被 0092 覆盖**。另扫描 ARMv8.1 LSE 原子指令（A53 是 ARMv8.0，LSE 会 UNDEF）：
+早期函数中 **0 处**，所以 `esr 02000000` 确实就是那条 `mrs` 本身。
+
+**7. 下一步**
+
+`fastboot boot` 0092 镜像，看：
+- 若不再有 `SWEET FAULT` 且标记递增 → **M1 前进，准备进 M2**；
+- 左下角应出现 `stkXXXX`（剩余栈 ÷18 的十六进制）：`stk0e29` = 65,264 B 剩；
+- 若仍有故障 → 这次是**真**故障，`pc/lr/sp/esr/far` 齐全且只报一条。
 
 ## 交付物：可以直接 fastboot boot 的镜像（2026-11-12）
 
