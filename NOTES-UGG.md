@@ -2,7 +2,87 @@
 
 > 本文件镜像上游 NOTES.md 的 handoff 规范：每次里程碑后更新最新 handoff，区分事实与猜测。
 
-## Agent handoff / active work (2026-11-07, latest)
+## Agent handoff / active work (2026-11-12, latest)
+
+### >>> M1 未通过，但故障已完全定位；0090 已推送并 CI 通过 <<<
+
+**读这里：A/B 两臂同现象，排除了 ADT/dram-size 那条捷径；真正原因是启动中断栈被用光。**
+补丁 `0090-ugg-early-stack-growth.patch` 已提交并构建成功，等真机验证。
+
+**1. 真机结果（0089 内核，用户两张屏摄）**
+
+- `build-m1/diag/shim-boot-a-512m.img`（dram-size 512 MiB）与
+  `shim-boot-b-1g25.img`（1280 MiB > 1 GiB）**输出逐字节相同**，
+  都是 `Sending OKAY` / `Booting OKAY` 后在同一个地方 panic。
+- ⇒ `arm_init.c` 里 `memSize > 1 GiB` 分支、16 KiB VM 页 / `PAGE_RATIO=4`
+  **不是**本故障原因。C（1.73 GiB）、D（base 0x92000000）两臂**不再跑**，
+  再改 ADT 试运气就是白烧 CI 轮次。
+- 标记 13（`pmap_bootstrap done`）两臂都没出现 ⇒ **M1 仍未通过，M2 = 0%**。
+
+**2. 故障定位（硬件值，算术自洽）**
+
+```
+SWEET FAULT badstack
+  pc ffffffe000743dba4  lr ffffffe000743d5a4  sp fffffe00080abf50
+  esr 9600004f  far ffffffe00080abfd0
+```
+
+| 事实 | 依据 |
+|---|---|
+| `pc = _sleh_synchronous+4`，指令是 `stp x28,x27,[sp,#0x80]`（一条**写**） | 反汇编 + 符号表 |
+| `far - sp = 0x80`，正好是该 stp 的偏移 ⇒ **sp 是 frame base** | 逐字对上 |
+| `ESR 0x9600004f` = data abort EL1 / WnR=1 / **permission fault level 3** | ESR 解码 |
+| `far` 落在 `[_intstack_low_guard, _intstack)`，该页被 `arm_page_granular_RNX` 设成只读 | 符号表 + `arm_vm_init.c:1462` |
+
+**关键更正**：`ss.sp` **不是**被打断时的 SP。`CHECK_KERNEL_STACK` 的
+`Lcorrupt_stack` 路径在 `sub sp,sp,#ARM_CONTEXT_SIZE` **之后**才 `str SP_EL0`，
+存的是 frame base；正常 `EL1_SP0_VECTOR` 路径才存原始 SP。所以：
+
+```
+被打断时 SP_EL0 = 0xfffffe00080abf50 + 0x350 = 0xfffffe00080ac2a0
+_intstack      = 0xfffffe00080ac000   _intstack_top = 0xfffffe00080b0000  (16 KiB)
+剩余 = 672 字节        异常入口需要 ARM_CONTEXT_SIZE = 848
+848 - 672 = 176  ⇒  frame 越过栈底 176 字节，落进只读保护页
+已用 15712 / 16384 = 95.9%
+```
+
+**3. 我早先的一个错误结论（已推翻，勿再引用）**
+
+曾认为 SP0 向量的 `tbz w1,#31`（机器码 `0x36f80561`）会跳过栈检查，
+把这条 panic 当误报。**错**，是我解码位域时算错位号：
+`b5=(w>>24)&1=0`、`b40=(w>>19)&0x1f=31` ⇒ 测试的是 ESR **bit 31 = 5+ESR_EC_SHIFT**。
+EC 0x25/0x26 的 bit31 都为 1，正是「可能栈坏」的那两类。本次 bit31=1，
+所以 `CHECK_KERNEL_STACK` **确实执行**、走进 `Lcorrupt_stack`，**panic 属实**。
+⇒ `locore.s` 没有缺陷，不需要改。
+
+**4. 0090 做了什么**
+
+- `osfmk/mach/arm/vm_param.h`：`INTSTACK_SIZE`/`EXCEPSTACK_SIZE` 对
+  `BOARD_UGG`/`BOARD_UGGLITE` 乘 4（16 → 64 KiB）。`KERNEL_STACK_SIZE`
+  早就为 KASAN/DEBUG 扩容，启动栈却没有。汇编侧读 genassym 的
+  `INTSTACK_SIZE_NUM`/`EXCEPSTACK_SIZE_NUM`，**自动跟随**。
+- `osfmk/arm64/sweet_early.c`：每个 `sweet_early_mark()` 行尾加 `stkXXXX`
+  （剩余启动栈 ÷16 的十六进制，`stk0400`=16 KiB）；故障报告多打一行
+  `el0/ibase/itop/free`。故障路径手写 hex、不用 `_doprnt`，因为它自己已快没栈。
+
+**5. 交付物 / 复现**
+
+| 项 | 值 |
+|---|---|
+| commit | `384d673`（补丁）、`7ece0a9`（算术注释更正） |
+| CI run | `43165952502` `macos-15-intel` **success** |
+| patch-report | `applied=94 skipped=4`（4 条是 dxb 自带的上游补丁，长期如此） |
+| kernel | 17,317,968 B，sha256 `4106d3d2c1abd15336cbcab36c38c3a1dba5cefa1bee6901697f5ed12982621d` |
+| 补丁校验 | 对 0089 树 `git apply --check` 通过、逐字节复现改动、不可重复应用 |
+
+**6. 下一步**
+
+等手机接上，用 0090 内核做 `fastboot boot`（RAM-only，不刷机），
+看屏上 `stk` 从哪个标记开始明显变小：
+- 若 64 KiB 够用 → 标记 13/14 应出现，M1 前进；
+- 若仍不够 → 说明链里有远超预期的栈消耗，按 `stk` 实测定位到具体函数再修。
+
+## Previous: 2026-11-07 及更早
 
 ### >>> U1 已在真机通过（700bfa6 镜像，用户实拍红屏报告）<<<
 
