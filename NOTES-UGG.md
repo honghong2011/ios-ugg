@@ -119,6 +119,15 @@ fastboot boot build-m1/diag2/shim-boot-0090-stack64k.img
    `el0/ibase/itop/free` 整行可直接对账，不用猜。
 
 无论哪种，**这次都不要再改 ADT**：A/B 已证明 ADT 形状不是变量。
+
+**唯一变量保证（事实）**：新镜像与已上机跑过的 A 臂用的是**逐字节相同的 shim**。
+把两个镜像的 kernel blob 解压后比对：偏移 32 之后的部分与 `build-m1/shim-Image-CI.bin`
+的 32 之后部分**完全相同**，只有 arm64 Image 头的 `text_offset`(8..10) 与
+`image_size`(16..18) 六个字节不同 —— 那正是 `pack-ugg.py` 故意改写的（声明
+shim+payload 的总长）。所以本轮唯一变量就是内核：0089 → 0090。
+
+本次重跑 `python build-m1/mk0090b.py` 得到的 sha256 与首次完全一致（确定性构建）。
+
 ## Previous: 2026-11-07 及更早
 
 ### >>> U1 已在真机通过（700bfa6 镜像，用户实拍红屏报告）<<<
