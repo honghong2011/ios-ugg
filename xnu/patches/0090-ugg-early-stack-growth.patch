@@ -1,0 +1,137 @@
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index c013288..5713c6e 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -327,10 +327,37 @@ extern uint64_t                 gDramBase, gDramSize;
+ # define KERNEL_STACK_SIZE      (4*4096*KERNEL_STACK_MULTIPLIER)
+ #endif /* XNU_KERNEL_PRIVATE */
+ 
+-#define INTSTACK_SIZE           (4*4096)
++/*
++ * Boot interrupt and exception stacks.
++ *
++ * KERNEL_STACK_SIZE above scales with KASAN and DEBUG because an instrumented
++ * or -O0 compiler needs more stack per frame. INTSTACK_SIZE had no equivalent
++ * scaling, so a DEVELOPMENT/DEBUG kernel runs its longest early chain - the
++ * arm_init -> arm_vm_init -> pmap_bootstrap path and the ADT walk - on the
++ * same 16 KiB a RELEASE kernel uses. Synchronous EL1 exceptions share it too:
++ * the EL1_SP0 vector reserves ARM_CONTEXT_SIZE (848) bytes before any C runs.
++ *
++ * On UGG that overflows. The phone faulted with FAR 0xfffffe00080abfd0, ESR
++ * 0x9600004f (data abort, write, permission fault level 3) and SP_EL0
++ * 0xfffffe00080abf50: the chain's stack pointer had already descended 176
++ * bytes past the bottom of intstack, and its next frame store landed in the
++ * 16 KiB low guard page that arm_vm_init() maps read-only and no-execute.
++ * CHECK_KERNEL_STACK detected this and panicked correctly - the guard page
++ * turned a silent stack smash into a reported fault, at the cost of stopping
++ * the boot. Give UGG a 4x early stack; these are per CPU and the memory is
++ * negligible on a 4 GiB device. The assembly checks read INTSTACK_SIZE_NUM
++ * from genassym, so they follow this constant automatically.
++ */
++#if defined(BOARD_UGG) || defined(BOARD_UGGLITE)
++#define INTSTACK_SCALE          (4)
++#else
++#define INTSTACK_SCALE          (1)
++#endif
++
++#define INTSTACK_SIZE           (4*4096*INTSTACK_SCALE)
+ 
+ #ifdef __arm64__
+-#define EXCEPSTACK_SIZE         (4*4096)
++#define EXCEPSTACK_SIZE         (4*4096*INTSTACK_SCALE)
+ #else
+ #define FIQSTACK_SIZE           (4096)
+ #endif
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -57,6 +57,70 @@
+ }
+ 
+ extern unsigned char iso_font[256 * 16];
++
++/*
++ * Boot stack bounds from __BOOTDATA (osfmk/arm/data.s). arm_init() runs on
++ * SP_EL0 == &intstack_top and every synchronous exception taken from SP_EL0 is
++ * framed on that same stack, so these turn a raw SP reading into "how much of
++ * the boot stack this chain has already consumed".
++ */
++extern uint8_t intstack[];
++extern uint8_t intstack_top[];
++
++static void sweet_early_vprint(const char *fmt, ...);
++
++static uintptr_t
++sweet_early_sp_el0(void)
++{
++	uintptr_t el0;
++
++	__asm__ volatile("mrs %0, SP_EL0" : "=r"(el0));
++	return el0;
++}
++
++/* Bytes of boot interrupt stack still unused below SP_EL0. */
++static uintptr_t
++sweet_early_stackfree(void)
++{
++	uintptr_t el0 = sweet_early_sp_el0();
++	uintptr_t base = (uintptr_t)intstack, top = (uintptr_t)intstack_top;
++
++	if (el0 < base || el0 > top) {
++		return 0;               /* off the boot stack: thread stack later on */
++	}
++	return el0 - base;
++}
++
++/*
++ * Four hex digits without _doprnt: this is reachable from the handler that has
++ * already run out of stack, and doprnt would need a few hundred bytes of the
++ * very resource being measured.
++ */
++static void
++sweet_early_hex4(unsigned int v)
++{
++	static const char digits[] = "0123456789abcdef";
++
++	sweet_early_putc(digits[(v >> 12) & 0xf]);
++	sweet_early_putc(digits[(v >> 8) & 0xf]);
++	sweet_early_putc(digits[(v >> 4) & 0xf]);
++	sweet_early_putc(digits[v & 0xf]);
++}
++
++/*
++ * Full reading, for the fault report only. Stage markers use the compact form
++ * in sweet_early_mark() instead: a second line per marker would wrap the
++ * 39-row screen ring and scroll the early ladder off before the fault prints.
++ */
++static void
++sweet_early_stackinfo(void)
++{
++	sweet_early_vprint("  el0 %016llx ibase %016llx itop %016llx free %016llx\n",
++	    (unsigned long long)sweet_early_sp_el0(),
++	    (unsigned long long)(uintptr_t)intstack,
++	    (unsigned long long)(uintptr_t)intstack_top,
++	    (unsigned long long)sweet_early_stackfree());
++}
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+@@ -156,6 +220,9 @@
+ 	sweet_early_putc((char)('0' + stage % 10));
+ 	sweet_early_string(": ");
+ 	sweet_early_string(label);
++	/* free boot stack in 16-byte units, e.g. "stk0400" == 16 KiB free */
++	sweet_early_string(" stk");
++	sweet_early_hex4((unsigned int)(sweet_early_stackfree() >> 4));
+ 	sweet_early_putc('\n');
+ }
+ 
+@@ -190,6 +257,8 @@
+ 	    "\n sp %016llx  esr %08x  far %016llx\n",
+ 	    (unsigned long long)pc, (unsigned long long)lr,
+ 	    (unsigned long long)sp, (unsigned int)esr, (unsigned long long)far);
++	sweet_early_string(" istack:");
++	sweet_early_stackinfo();
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
