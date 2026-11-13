@@ -1,19 +1,30 @@
 diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
 --- a/osfmk/arm64/sweet_early.h
 +++ b/osfmk/arm64/sweet_early.h
-@@ -9,6 +9,11 @@
- #if defined(SWEET)
+@@ -6,6 +6,16 @@
+ #include <stdarg.h>
+ #include <stdint.h>
+ 
++/*
++ * Guard on SWEET_FAMILY, not SWEET.
++ *
++ * SWEET only exists after <pexpert/arm64/board_config.h> has been pulled in,
++ * and several translation units (osfmk/arm/pmap/pmap_data.c among them) never
++ * include it. SWEET_FAMILY is passed as -DSWEET_FAMILY on the command line for
++ * this family, so it is visible everywhere. Guarding on SWEET here silently
++ * compiled the callers against the no-op stubs.
++ */
++#if defined(SWEET_FAMILY)
  void sweet_early_mark(unsigned int stage, const char *label);
  void sweet_early_putc(char c);
-+/*
-+ * Print one tagged hex value. Deliberately no varargs and no system-register
-+ * access, so it is safe to call from boot paths that may already be fragile.
-+ */
-+void sweet_early_val(const char *tag, uint64_t value);
- void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
-     uint32_t esr, uint64_t far);
+ /*
+@@ -18,11 +28,16 @@
  void sweet_early_panic(const char *fmt, va_list *args);
-@@ -19,6 +24,11 @@
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+-#else
++#else /* !SWEET_FAMILY */
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
  {
  	(void)stage;
  	(void)label;
@@ -60,9 +71,9 @@ diff --git a/osfmk/arm/pmap/pmap_data.c b/osfmk/arm/pmap/pmap_data.c
  #include <vm/vm_page.h>
  #include <vm/vm_pageout.h>
  
-+#if defined(SWEET)
++#if defined(SWEET_FAMILY)
 +#include <arm64/sweet_early.h>
-+#endif /* SWEET */
++#endif /* SWEET_FAMILY */
 +
  #include <arm/pmap/pmap_internal.h>
  
@@ -72,7 +83,7 @@ diff --git a/osfmk/arm/pmap/pmap_data.c b/osfmk/arm/pmap/pmap_data.c
  	pt_desc_t *ptd_root_table = (pt_desc_t *)phystokv(avail_start);
  	avail_start = round_page(avail_start + ptd_root_table_size);
 +
-+#if defined(SWEET)
++#if defined(SWEET_FAMILY)
 +	/*
 +	 * The physmap must cover every page this memset touches. When it does not,
 +	 * the store lands on an unmapped L1 slot and surfaces as a translation
@@ -98,7 +109,7 @@ diff --git a/osfmk/arm/pmap/pmap_data.c b/osfmk/arm/pmap/pmap_data.c
 +		sweet_early_val("physmapend", (uint64_t)physmap_end);
 +		sweet_early_val("zerolastva", (uint64_t)(phystokv(pmap_struct_start) + (avail_start - pmap_struct_start) - 1));
 +	}
-+#endif /* SWEET */
++#endif /* SWEET_FAMILY */
  
  	memset((char *)phystokv(pmap_struct_start), 0, avail_start - pmap_struct_start);
  
