@@ -75,6 +75,56 @@
 - 左下角应出现 `stkXXXX`（剩余栈 ÷18 的十六进制）：`stk0e29` = 65,264 B 剩；
 - 若仍有故障 → 这次是**真**故障，`pc/lr/sp/esr/far` 齐全且只报一条。
 
+## 交付物：0093（当前最新，诊断版，2026-11-13 深夜）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `build-m1/diag2/shim-boot-0093-physmapdiag.img` |
+| 大小 | 8,151,040 B |
+| sha256 | `4716e9bf7b8e7ac2def386e7ea01ac1ce958edd3498f6996d35742a2827fa815` |
+| 内核 | `ci-xnu13/kernel.development.ugg`，**17,318,080 B**，sha256 `011b6c19...105570ba` |
+| 来源 CI | run `43438611222`（`d659127`）**success**，`applied=97 skipped=4` |
+| 构造脚本 | `build-m1/mk0094.py` |
+
+**用法（RAM-only，不刷任何分区）**：
+
+`
+fastboot boot build-m1/diag2/shim-boot-0093-physmapdiag.img
+`
+
+**三重门禁已验证（事实，这是本次修复的证明）**：
+
+| 门禁 | 结果 |
+|---|---|
+| `_sweet_early_val` 符号 | **存在** `0xfffffe000743a150` |
+| 10 个诊断 tag 字符串 | **全部存在**（0x78776 附近连续） |
+| `_pmap_data_bootstrap` 大小 | `0x300`（0092 是 `0x210`），**增长 240 字节** |
+| shim 代码区 | 与 0092 / `shim-Image-CI.bin` **逐字节相同** |
+
+**这次预期看到**（10 个数字，每行一个）：
+
+`
+pmapstruct    <pmap_struct_start 物理地址>
+availstart    <分配结束位置>
+zerolen       <memset 长度>
+zerva         <清零起始虚拟地址>
+mem_size      <XNU 认为的内存大小>
+realphys      <physmap 实际覆盖大小>
+gphysbase     <物理基址，应 0x91600000>
+physmapbase   <physmap 窗口起始 VA>
+physmapend    <physmap 窗口结束 VA>
+zerolastva    <清零范围最后一个字节的 VA>
+`
+
+**判读**：
+
+| 情况 | 含义 | 修法 |
+|---|---|---|
+| `zerolastva > physmapend` | 清零范围超出 physmap 窗口 | 扩大 physmap 映射 或 缩小表 |
+| `zerva` 本身就在窗口外 | 分配器已越界 | 对齐 ADT memory 与 real_phys_size |
+| `realphys < mem_size` | XNU 以为内存比映射的多 | 让 ADT memory 节点与实际一致 |
+| 只差一页 | 表尺寸 off-by-one | 直接修边界 |
+
 ## 交付物：0092（当前最新，可直接 fastboot boot，2026-11-13）
 
 | 项 | 值 |
