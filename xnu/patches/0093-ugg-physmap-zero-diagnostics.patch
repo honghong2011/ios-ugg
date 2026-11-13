@@ -1,36 +1,30 @@
 diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
 --- a/osfmk/arm64/sweet_early.h
 +++ b/osfmk/arm64/sweet_early.h
-@@ -8,7 +8,13 @@
- 
+@@ -9,6 +9,11 @@
  #if defined(SWEET)
  void sweet_early_mark(unsigned int stage, const char *label);
--void sweet_early_putc(char c);void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
-+void sweet_early_putc(char c);
+ void sweet_early_putc(char c);
 +/*
 + * Print one tagged hex value. Deliberately no varargs and no system-register
 + * access, so it is safe to call from boot paths that may already be fragile.
 + */
 +void sweet_early_val(const char *tag, uint64_t value);
-+void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
+ void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
      uint32_t esr, uint64_t far);
  void sweet_early_panic(const char *fmt, va_list *args);
- void sweet_early_relocate(uint64_t base);
-@@ -18,7 +24,13 @@
+@@ -19,6 +24,11 @@
  {
  	(void)stage;
  	(void)label;
--}static inline void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr,
 +}
 +static inline void sweet_early_val(const char *tag, uint64_t value)
 +{
 +	(void)tag;
 +	(void)value;
-+}
-+static inline void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr,
+ }
+ static inline void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr,
      uint64_t sp, uint32_t esr, uint64_t far)
- {
- 	(void)tag;
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
