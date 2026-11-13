@@ -1,0 +1,110 @@
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -8,7 +8,13 @@
+ 
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
+-void sweet_early_putc(char c);void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
++void sweet_early_putc(char c);
++/*
++ * Print one tagged hex value. Deliberately no varargs and no system-register
++ * access, so it is safe to call from boot paths that may already be fragile.
++ */
++void sweet_early_val(const char *tag, uint64_t value);
++void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
+     uint32_t esr, uint64_t far);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+@@ -18,7 +24,13 @@
+ {
+ 	(void)stage;
+ 	(void)label;
+-}static inline void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr,
++}
++static inline void sweet_early_val(const char *tag, uint64_t value)
++{
++	(void)tag;
++	(void)value;
++}
++static inline void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr,
+     uint64_t sp, uint32_t esr, uint64_t far)
+ {
+ 	(void)tag;
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -324,6 +324,24 @@
+ 	for (int shift = 28; shift >= 0; shift -= 4) {
+ 		sweet_early_putc(digits[(v >> shift) & 0xf]);
+ 	}
++}
++
++/*
++ * Diagnostic readout for boot paths that need to report several numbers.
++ *
++ * Uses only sweet_early_putc/hex helpers: no varargs, no _doprnt, no system
++ * registers, so it stays safe even where the earlier SP_EL0 read trapped.
++ */
++void
++sweet_early_val(const char *tag, uint64_t value)
++{
++	if (early_disabled) {
++		return;
++	}
++	sweet_early_putc('\n');
++	sweet_early_string(tag);
++	sweet_early_putc(' ');
++	sweet_early_hex64(value);
+ }
+ 
+ void
+diff --git a/osfmk/arm/pmap/pmap_data.c b/osfmk/arm/pmap/pmap_data.c
+--- a/osfmk/arm/pmap/pmap_data.c
++++ b/osfmk/arm/pmap/pmap_data.c
+@@ -38,6 +38,10 @@
+ #include <vm/vm_page.h>
+ #include <vm/vm_pageout.h>
+ 
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif /* SWEET */
++
+ #include <arm/pmap/pmap_internal.h>
+ 
+ /**
+@@ -692,6 +696,34 @@
+ 
+ 	pt_desc_t *ptd_root_table = (pt_desc_t *)phystokv(avail_start);
+ 	avail_start = round_page(avail_start + ptd_root_table_size);
++
++#if defined(SWEET)
++	/*
++	 * The physmap must cover every page this memset touches. When it does not,
++	 * the store lands on an unmapped L1 slot and surfaces as a translation
++	 * fault inside bzero, which says nothing about which number was wrong.
++	 * Print the whole set first so the next boot reports the offending value.
++	 */
++	{
++		/*
++		 * Declared here with the same qualifiers as arm_vm_init.c defines
++		 * them; a mismatched declaration is a hard link/type error.
++		 */
++		extern unsigned long real_phys_size;
++		extern vm_map_address_t physmap_base, physmap_end;
++
++		sweet_early_val("pmapstruct", (uint64_t)pmap_struct_start);
++		sweet_early_val("availstart", (uint64_t)avail_start);
++		sweet_early_val("zerolen", (uint64_t)(avail_start - pmap_struct_start));
++		sweet_early_val("zerva", (uint64_t)phystokv(pmap_struct_start));
++		sweet_early_val("mem_size", (uint64_t)mem_size);
++		sweet_early_val("realphys", (uint64_t)real_phys_size);
++		sweet_early_val("gphysbase", (uint64_t)gPhysBase);
++		sweet_early_val("physmapbase", (uint64_t)physmap_base);
++		sweet_early_val("physmapend", (uint64_t)physmap_end);
++		sweet_early_val("zerolastva", (uint64_t)(phystokv(pmap_struct_start) + (avail_start - pmap_struct_start) - 1));
++	}
++#endif /* SWEET */
+ 
+ 	memset((char *)phystokv(pmap_struct_start), 0, avail_start - pmap_struct_start);
+ 
