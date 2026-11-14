@@ -957,3 +957,46 @@ QEMU 里实际生效的 `PAGE_RATIO` 是多少。已知：
 
 这个问题**只在 QEMU 暴露**，真机可能根本走不到（真机连 stage-0 白带都还没验证过）。
 继续在 QEMU 深挖的性价比不高，**优先让真机跑一次**，用真实屏显判断卡在哪。
+
+---
+
+## 19. 第 7 轮收尾：QEMU 未通过，但换来 5 个真 bug 的修复
+
+### 19.1 QEMU 现状（诚实记录）
+
+| 项 | 值 |
+|---|---|
+| 状态 | 仍然 no decodable console output，屏幕只有一行 4 个未识别字形 |
+| 已排除 | 内存大小（1.5 GiB 与真机一致）、framebuffer 地址/stride、sweet_early_mark 越界、commpage 补丁 |
+| 未确认 | 内核在 pmap_bootstrap 之前就发生 Prefetch Abort（FAR = common_start+0x198 的物理地址） |
+| 已埋点 | UGG PMAP: commpage vaddr... 这行**没有出现** ⇒ 没走到 pmap_create_commpages |
+
+结论：故障点在 arm_vm_init 早期（mark 10 之前），不是 commpage，也不是 pmap_bootstrap。
+
+### 19.2 本轮修掉的 5 个真 bug（真机同样会中）
+
+| # | 文件 | 问题 | 后果 |
+|---|---|---|---|
+| 1 | start.s UGG_MARK | 0x90001000 + 1888*4320，stride 4320 | 写越界 0x6F100 字节，超出 splash_region |
+| 2 | start.s stage-0 白带 | 同上 | 同上 |
+| 3 | sweet_early.c sweet_early_mark | stage*48 循环到 (stage+1)*48，stage 最大 20 ⇒ x 到 1008 | 超出 720 宽 288 像素，绕行后越出 framebuffer（QEMU 寄存器 X17=0x90383920 正是 row 1279 col 280，X2=0x94000000 已越过 splash 区） |
+| 4 | SweetFramebuffer.cpp MDP 回退 | 0x90001000 / 4320 | 错地址 |
+| 5 | tools/mkadt_ugg.py QEMU 模式 | 原 512 MiB ⇒ 实际测 4K VM 路径 | QEMU 测的不是真机路径 |
+
+### 19.3 为什么仍然值得
+
+bug 1-4 是 mido 的固定几何假设，真机同样会写错地址。
+尤其 bug 3：stage 20 时写 x=960..1008，而面板只有 720 宽 —— 不是「可能有问题」，
+而是每次启动只要有 stage>=15 就必然越界。
+
+### 19.4 判断：QEMU 到此为止
+
+| 理由 | 说明 |
+|---|---|
+| 投入产出 | 已 6 轮 CI，仍未定位 arm_vm_init 早期故障 |
+| 真机才是判据 | 用户要进桌面，真机屏显直接告诉我们卡在哪 |
+| QEMU 固有限制 | ugg 的真实 MMIO / RPM / eMMC / 面板都不在 QEMU 里 |
+| 已提取价值 | 5 个真 bug 已修，修法有据，不是试错 |
+
+建议：优先真机 fastboot boot，用屏显定位；QEMU 保留为回归检查，不阻塞。
+
