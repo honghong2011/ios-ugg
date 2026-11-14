@@ -1,5 +1,89 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 04:55，第 10 轮完）-- 刷这个镜像
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1258 行）。
+
+### 镜像
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+8,169,472 B
+sha256 2b435f5b189849d28f809162c6e00e18faa51523f21d048ce9ec9c2608b93edc
+```
+
+### 这版修了什么（比之前所有版本都关键）
+
+**1. shim 现在会初始化 eMMC（之前完全没做）**
+
+`shim_main()` 原本把 `loader_boot()` 放第一条语句，eMMC 初始化只在「无 payload」
+分支里跑。所以手机带 payload 启动时**卡从未被初始化**。
+
+XNU 自己的代码就是证据（`bsd/dev/sweet_ufs.c`）：
+
+```c
+printf("UGG EMMC: card not in transfer state after the shim (%d)\n", e);
+```
+
+**「after the shim」** —— 它假设 shim 已经把卡初始化好，自己只调超时计数器。
+
+| 不修会怎样 |
+|---|
+| `Still waiting for root device` 永远不出来 |
+| **即使刷了 16 GB 根卷也读不到 GPT** |
+| 会被误判成根卷问题 |
+
+**2. 补上 L6 电源（vcc_i2c 1.8 V）**
+
+`ugg_input.c` 注释说 shim 会准备 L10 + **L6** 两路，实际只投了 L10。
+UGG 的 DTB：`goodix@5d` 的 `vcc_i2c-supply` = `regulator-l6`（1.8 V）。
+没这路电，I2C 上拉无源，总线恒读 0xFF。
+
+### 屏上现在会多出这些行（判读用）
+
+```
+EMMC HC_MODE=00000001
+ PRES=... HCTL=... CLK=... HCTL2=...
+ BUS POWER ON: PWRREQ=..
+LBA0 E=0 SIG=AA55 OK
+LBA1 E=0 GPT OK
+#25 F=... N=... cache
+CACHE F=... N=...
+LOG TO CACHE ENABLED
+LOG VERIFY OK
+INPUT SETUP: RPM L10 E=0 L6 E=0 CLK ON
+```
+
+**关键判读**：
+
+| 看到 | 含义 | 动作 |
+|---|---|---|
+| `EMMC INIT FAILED` | shim 阶段 eMMC 就没起来 | **拍照给我** |
+| `BUS POWER STILL OFF - ABORT` | 电源握手失败 | **拍照给我** |
+| `LBA0 ... BAD` / `NO GPT` | 读到了但内容不对 | **拍照给我** |
+| `LBA1 ... GPT OK` + 分区列表 | **eMMC 通了** ✅ | 继续看后面 |
+| `Still waiting for root device` | eMMC OK 但没根卷（预期） | 去刷根卷 |
+| `panic:` | **拍照给我** | |
+
+这次屏上会直接列出**你的真实分区表**（`#25 F=... N=... cache` 这样的行），
+那本身就是 eMMC 驱动工作的证明。
+
+### 根卷（不变）
+
+| 项 | 值 |
+|---|---|
+| artifact | `ios16-root-parts`，run 43634756880 |
+| 大小 | 11,970,598,900 B，7 片 |
+| 有效期 | **到 2026-11-19** |
+
+下载：`./ugg/flash-root.sh /path/with/20GB`（本机 C: 只有 7.3 GB，需换盘）
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 04:45，第 10 轮）-- 找到一个会让根卷白刷的 bug
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1258 行）。
