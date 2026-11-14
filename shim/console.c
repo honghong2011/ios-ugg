@@ -16,6 +16,54 @@
 #define LABEL_COLS	8
 
 volatile uint32_t *con_fb = (volatile uint32_t *)FB_PHYS;
+
+/* ---------------- console text log ring ----------------
+ *
+ * The panel is the only output on this phone and a photo of it is lossy, so
+ * every console character is also appended to a plain-text ring in RAM that
+ * the shim can write to the eMMC "cache" partition. A host then reads it with
+ * one dd. Layout: "UGGSHIM\0" magic, u32 length at +8, text from +16.
+ *
+ * The buffer sits inside reserved-memory/wcnss_fw_region@0
+ * (0x8e300000 + 0x700000 = 0x8e300000..0x8ea00000), which the kernel never
+ * uses and which is above every region LK loads us into.
+ */
+#ifndef CON_LOG_PHYS
+#define CON_LOG_PHYS 0x8e800000UL
+#endif
+#ifndef CON_LOG_SIZE
+#define CON_LOG_SIZE 0x10000UL          /* 64 KiB, matches the 128-sector ring */
+#endif
+
+static unsigned con_log_len;
+
+uintptr_t
+con_log_phys(void)
+{
+	return CON_LOG_PHYS;
+}
+
+void
+con_log_init(void)
+{
+	static const char m[8] = { 'U', 'G', 'G', 'S', 'H', 'I', 'M', 0 };
+	for (int i = 0; i < 8; i++) {
+		*(volatile char *)(CON_LOG_PHYS + (uintptr_t)i) = m[i];
+	}
+	con_log_len = 0;
+	*(volatile uint32_t *)(CON_LOG_PHYS + 8) = 0;
+}
+
+static void
+con_log_putc(char c)
+{
+	if (con_log_len + 16 < CON_LOG_SIZE) {
+		*(volatile char *)(CON_LOG_PHYS + 16 + con_log_len) = c;
+		con_log_len++;
+		*(volatile uint32_t *)(CON_LOG_PHYS + 8) = con_log_len;
+	}
+}
+
 static uint32_t con_bg;
 static int row;
 
@@ -102,6 +150,7 @@ static void put_char_in(volatile uint8_t *base, int col, char ch, uint32_t fg)
 /* Every glyph is drawn into all frames, so whichever one scans out shows it. */
 static void put_char(int col, char ch, uint32_t fg)
 {
+	con_log_putc(ch);
 	for (int f = 0; f < FB_FRAMES; f++)
 		put_char_in((volatile uint8_t *)con_fb + (uintptr_t)f * FB_FRAME_BYTES,
 			    col, ch, fg);

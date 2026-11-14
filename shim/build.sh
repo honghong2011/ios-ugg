@@ -36,8 +36,15 @@ fi
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -mgeneral-regs-only \
 	-mstrict-align -fno-stack-protector -Wall -Wextra $BOARD_DEFS ${EXTRA_CFLAGS:-}"
 
-SRCS="start.S shim.c console.c mmu.c fdt.c loader.c ufs.c probe.c"
-CSRCS="shim.c console.c mmu.c fdt.c loader.c ufs.c probe.c"
+# ufs.c (the UFS probe) is superseded by the eMMC path: sdhc.c is the 
+# SDHCI-MSM driver, rpm.c/spmi.c are its power and PMIC helpers, and 
+# mido_console.c adapts the console API of those ported files. 
+# perf.c / input.c are the CPU-clock and touch bring-up, gpu.c is not 
+# ported (CPU rendering only).
+SRCS="start.S shim.c console.c mido_console.c mmu.c fdt.c loader.c probe.c 
+      sdhc.c spmi.c rpm.c perf.c input.c emmc.c"
+CSRCS="shim.c console.c mido_console.c mmu.c fdt.c loader.c probe.c 
+       sdhc.c spmi.c rpm.c perf.c input.c emmc.c"
 
 mkdir -p out
 OBJS=""

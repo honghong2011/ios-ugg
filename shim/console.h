@@ -25,6 +25,8 @@
 extern volatile uint32_t *con_fb;
 
 void con_clear(uint32_t bg);
+uintptr_t con_log_phys(void);
+void con_log_init(void);
 void con_skip(void);
 void con_str(const char *label, const char *s);
 void con_hex(const char *label, uint64_t v);
