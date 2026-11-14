@@ -439,3 +439,54 @@ CPU 渲染代价：720x1280 每帧坐标变换，比 mido 的 1080x1920 少 47% 
 4. 你找 Linux 电脑跑 build-root.sh -> 给我三个数
 5. 刷 userdata -> 再 boot -> 目标桌面
 `
+
+---
+
+## 10. CI 迭代记录（每一轮的真实结果，照实记）
+
+### 10.1 轮次表
+
+| 轮 | 提交 | applied/skipped | 结果 | 错误 |
+|---|---|---|---|---|
+| 1 | `b6afa4b` | — | **cancelled** | 并发组被手动 dispatch 抢掉，不是代码问题 |
+| 2 | `b6afa4b` | `applied=86 skipped=4` ✅ | **失败** | `ugg_input.c:224` `unknown type name 'atic'` |
+| 3 | `275ecb1` | `applied=86 skipped=4` ✅ | **失败** | 3 个：`THREAD_CONTINUE_0`、`SweetSurface.cpp` 未闭合 `#if`、`ugg_mdp_hold_mode` 未声明 |
+| 4 | `5101a2c` | 待 | 待 | — |
+
+`skipped=4` 全部是 dxb 自带的**外来补丁**（iobuffermemd_monterey / skywalk_sonoma / syntax_checker_sonoma / TrustCache），
+与我们的 `0082` **无关**。CI 的 `ours_skipped` 过滤器确认 `patches-skipped` 注解**没有出现**。
+
+**这是本轮最重要的门禁：0082 第一次真正被应用了。**
+
+### 10.2 三个错误的根因（都是我引入的，不是 mido 的）
+
+| # | 文件 | 错误 | 根因 |
+|---|---|---|---|
+| 1 | `bsd/dev/ugg_input.c:306` | `use of undeclared identifier 'THREAD_CONTINUE_0'` | 我为了修 freestanding 的 `NULL`，粗暴地把整个 xnu 侧的 `ugg_input.c` 里所有 `NULL` 替换成 `0`，误伤了 `THREAD_CONTINUE_NULL` |
+| 2 | `iokit/Kernel/arm/SweetSurface.cpp:30` | `unterminated conditional directive` | 删 GPU 场景池时，把 `#if defined(UGG_BOARD)` 的配对 `#endif` 一起删了（那个 `#endif` 原本在池代码块尾部） |
+| 3 | `iokit/Kernel/arm/SweetFramebuffer.cpp:368` | `use of undeclared identifier 'ugg_mdp_hold_mode'` | 这个函数定义在第 560 行，但第 371 行就用了；mido 原版能过是因为它定义得更早，我的 `_UGG_FB_BLOCKS` 改动不影响，是我删 GPU 时连带调整了顺序 |
+
+### 10.3 教训（写下来避免再犯）
+
+1. **不要全局替换 `NULL`**。freestanding 的 shim 需要，但 xnu 侧的代码有 `NULL` 定义，且 `*_NULL` 这类宏名会被误伤。
+   正确做法：只在 shim 目录里替换，或 `#include <stddef.h>`。
+2. **删 `#if` 块必须成对删**。删完立刻数 `#if` 与 `#endif` 的个数。
+3. **本仓库没法本地编译 xnu**（需要 macOS SDK + Xcode）。所以每次推 CI 前，
+   至少要跑这三个静态检查：
+
+`
+# a) 预处理配平
+for f in <所有改动文件>; do
+  a=$(grep -c '^#if' $f); b=$(grep -c '^#endif' $f)
+  [ "$a" = "$b" ] || echo "IMBALANCE $f $a $b"
+done
+
+# b) 补丁能零冲突应用
+GIT_INDEX_FILE=<tmp> git read-tree <baseline> && \
+  git apply --cached --check <patch>
+
+# c) 新标识符有定义
+grep -rn '<new_ident>(' --include='*.c' --include='*.cpp' . | grep -v extern
+`
+
+4. **本地 grep 出来的宏名要用词边界**。之前用 `grep -oE 'MIDO_?[A-Z0-9_]*'` 把 `DEBUGGER` 里的 `UGGER` 也逮到，虚惊一场。
