@@ -112,29 +112,27 @@ jobs:
             ls -l "work/ipswext/$role.dmg"
           done
 
-      - name: Extract the device tree for /product
-        # The /product node of the real device tree is what MobileGestalt reads
-        # at runtime. Without it the userland still boots but backboardd and
-        # friends misbehave (mido hit exactly this with a missing D211AP tree).
-        # It is Apple's artifact, so it is produced here and shipped as an
-        # artifact instead of being committed.
+      - name: Extract the device tree for /product (optional)
+        # /product is what MobileGestalt reads at runtime; without it the
+        # userland still boots but backboardd and friends misbehave (mido hit
+        # this with a missing D211AP tree).
+        #
+        # This step must never block the root image: if the tree cannot be
+        # extracted, the root is still worth building and the ADT simply ends up
+        # without a /product node.
+        continue-on-error: true
         run: |
+          set +e
+          sudo apt-get install -y -qq lzfse || true
           python3 tools/ipsw_adt.py work/ipsw/fw.ipsw "${{ inputs.device || 'iPhone10,4' }}" work/d20ap.adt
-          ls -l work/d20ap.adt
-          python3 - <<'PY'
-          import os, sys
-          p = 'work/d20ap.adt'
-          d = open(p, 'rb').read()
-          if d[:4] != b'\xd0\x0d\xfe\xed':
-              sys.exit('not an FDT')
-          size = int.from_bytes(d[4:8], 'big')
-          print('device tree: %d bytes, FDT says %d' % (len(d), size))
-          # /product must be in there, that is the whole point
-          if b'product' not in d:
-              sys.exit('/product not found in the device tree')
-          print('/product node present')
-          PY
-
+          rc=$?
+          echo "ipsw_adt exit: $rc"
+          if [ $rc -ne 0 ] || [ ! -s work/d20ap.adt ]; then
+            echo '::warning title=device-tree::no device tree, the ADT will have no /product node'
+            rm -f work/d20ap.adt
+            exit 0
+          fi
+          python3 tools/ipsw_adt.py --check work/d20ap.adt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

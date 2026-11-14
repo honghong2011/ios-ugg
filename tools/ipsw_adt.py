@@ -29,6 +29,46 @@ DEVCODES = {
 }
 
 
+def lzfse_decode(buf):
+    """Decode an Apple bvx2 LZFSE block.
+
+    Apple ships DeviceTree IM4Ps LZFSE-compressed (magic 'bvx2'). Python has no
+    stdlib decoder, so try, in order: the lzfse CLI, pylezfse, and liblzfse via
+    ctypes. Failing all three is a clear error, not a silent wrong result.
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which('lzfse')
+    if exe:
+        out = subprocess.run([exe, '-decode'], input=buf, capture_output=True)
+        if out.returncode == 0 and out.stdout:
+            return out.stdout
+        sys.exit('lzfse -decode failed: %s' % out.stderr[:200])
+
+    try:
+        import lzfse as pylezfse  # type: ignore
+        return pylezfse.decompress(buf)
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        import ctypes.util
+        name = ctypes.util.find_library('lzfse') or 'liblzfse.so'
+        lib = ctypes.CDLL(name)
+        size = ctypes.c_size_t(len(buf) * 8)
+        dst = ctypes.create_string_buffer(size.value)
+        got = lib.lzfse_decode_buffer(dst, size, buf,
+                                      ctypes.c_size_t(len(buf)), None)
+        if got:
+            return dst.raw[:got]
+        sys.exit('liblzfse could not decode the payload')
+    except OSError:
+        sys.exit('the device tree is LZFSE-compressed and no decoder is '
+                 'available; apt-get install lzfse')
+
+
 def unwrap_im4p(buf):
     """Return the ADT payload of an IM4P-wrapped DeviceTree (DER container)."""
     tag, start, end = adt.der(buf, 0)
@@ -43,7 +83,7 @@ def unwrap_im4p(buf):
         sys.exit('not an IM4P container')
     payload = items[3][1]
     if payload[:4] == b'bvx2':
-        sys.exit('payload is LZFSE-compressed; decompress it first')
+        payload = lzfse_decode(payload)
     return payload
 
 
@@ -68,6 +108,13 @@ def validate(fdt, out):
 
 
 def main():
+    # --check validates an ADT that already exists (the CI step uses it so it
+    # can fail softly without taking the root build with it).
+    if len(sys.argv) == 3 and sys.argv[1] == '--check':
+        path = sys.argv[2]
+        validate(open(path, 'rb').read(), path)
+        return 0
+
     if len(sys.argv) < 4:
         sys.exit('usage: ipsw_adt.py IPSW_OR_URL DEVICE OUT.adt')
     ipsw, device, out = sys.argv[1], sys.argv[2], sys.argv[3]
