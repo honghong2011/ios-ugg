@@ -12,6 +12,7 @@
 #include "loader.h"
 #include "sdhc.h"
 #include "emmc.h"
+#include "fb32.h"
 #include "rpm.h"
 #include "perf.h"
 #include "input.h"
@@ -436,6 +437,14 @@ void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
 
+	/*
+	 * Before anything is drawn: LK leaves the RGB0 pipe in 24 bpp, while
+	 * this console and the XNU framebuffer driver both write 32-bit pixels
+	 * (UGG_FB_STRIDE is 720*4). Without the switch every scanline is read at
+	 * the wrong stride and the screen is diagonal garbage.
+	 */
+	shim_fb_to_32bpp();
+	
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_log_init();

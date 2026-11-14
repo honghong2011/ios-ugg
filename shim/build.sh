@@ -42,9 +42,9 @@ CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -mgeneral-regs-on
 # perf.c / input.c are the CPU-clock and touch bring-up, gpu.c is not 
 # ported (CPU rendering only).
 SRCS="start.S shim.c console.c mido_console.c mmu.c fdt.c loader.c probe.c 
-      sdhc.c spmi.c rpm.c perf.c input.c emmc.c"
+      sdhc.c spmi.c rpm.c perf.c input.c emmc.c fb32.c"
 CSRCS="shim.c console.c mido_console.c mmu.c fdt.c loader.c probe.c 
-       sdhc.c spmi.c rpm.c perf.c input.c emmc.c"
+       sdhc.c spmi.c rpm.c perf.c input.c emmc.c fb32.c"
 
 mkdir -p out
 OBJS=""

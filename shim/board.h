@@ -75,7 +75,7 @@
 #define FB_REGION_SIZE	0x1400000UL
 #define FB_W		720
 #define FB_H		1280
-#define FB_BPP		3		/* RGB888, 2160-byte rows */
+#define FB_BPP		4		/* 32 bpp: fb32.c switches RGB0 before the first draw */
 #define FB_SCALE	2
 #define FB_SWAP_RB	0
 
