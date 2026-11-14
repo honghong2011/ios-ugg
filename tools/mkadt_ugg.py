@@ -52,7 +52,17 @@ FB_W, FB_H, FB_STRIDE = 720, 1280, 720 * 4
 QEMU_GICD, QEMU_GICC = 0x08000000, 0x08010000
 QEMU_TIMEBASE = 62500000
 QEMU_VTIMER_INTID = 27
-QEMU_PHYS_BASE = 0x50000000
+# Must share a 1 GiB L1 region with the framebuffer at 0x90000000, because
+# start.s writes the fb L2 blocks into "the first L2 page" assuming the fb and
+# the RAM window land in the same L1 entry (on the phone: RAM 0xA0000000 and
+# fb 0x90000000 are both L1 index 2). With phys_base 0x50000000 the RAM is L1
+# index 1 while the fb is index 2, so the fb blocks were written into the wrong
+# L2 table and the kernel faulted the moment it enabled the MMU -- which is
+# exactly what the QEMU log showed (FAR = a physical address).
+#
+# 0xA0000000 is the phone value: inside 0x80000000..0xBFFFFFFF, above the 20 MiB
+# splash carve-out, and 0xA0000000 + 0x1ff00000 = 0xBFF00000 stays in one region.
+QEMU_PHYS_BASE = 0xA0000000
 # Must exceed 1 GiB: arm_init() picks 16 KB VM pages over the 4 KB hardware
 # granule only when memSize > 1 GiB, and that is the configuration the phone
 # runs. A smaller QEMU image would silently test the 4 KB path instead.
