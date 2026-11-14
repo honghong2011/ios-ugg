@@ -1151,7 +1151,7 @@ index 2545cf9..827429b 100644
  	unsigned int logical = target->getCPUNumber();
  	if (logical >= topology->num_cpus) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index a62416c..d315690 100644
+index a62416c..a9e0395 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -67,9 +67,21 @@ enum {
@@ -1328,7 +1328,7 @@ index a62416c..d315690 100644
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +507,275 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +507,276 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  
@@ -1485,8 +1485,9 @@ index a62416c..d315690 100644
 +		ugg_mdp_cfg_w = (uint32_t)w;
 +		ugg_mdp_cfg_h = (uint32_t)h;
 +	}
-+	MDP_W(VIG0 + 0x14, ugg_mdp_mode == 2 ? 0x90001000u : (uint32_t)pa);   /* SRC0_ADDR */
-+	MDP_W(VIG0 + 0x24, ugg_mdp_mode == 2 ? 4320u : s->bytesPerRow);       /* STRIDE_A */
++	/* ugg's panel: 0x90000000, 720x1280, stride 2880 (mido's 0x90001000/4320 is not this panel) */
++	MDP_W(VIG0 + 0x14, ugg_mdp_mode == 2 ? 0x90000000u : (uint32_t)pa);   /* SRC0_ADDR */
++	MDP_W(VIG0 + 0x24, ugg_mdp_mode == 2 ? 720u * 4u : s->bytesPerRow);   /* STRIDE_A */
 +	if (!ugg_mdp_staged) {
 +		MDP_W(CTL0, 0x1);                           /* LM0: VIG0 where RGB0 was */
 +		MDP_W(CTL0 + 0x18, 0x1u | 0x40u | 0x20000u);  /* flush VIG0, LM0, CTL */
@@ -2295,10 +2296,10 @@ index 24f1abc..5bbe12d 100644
  	__builtin_arm_isb(ISB_SY);
  #else
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 023086f..59f628e 100644
+index 023086f..b34507b 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -52,6 +52,35 @@
+@@ -52,6 +52,41 @@
  #endif
  .endmacro
  
@@ -2308,9 +2309,15 @@ index 023086f..59f628e 100644
 +	add		x16, x16, EXT(ugg_mark_save)@pageoff
 +	stp		x0, x1, [x16]
 +	stp		x2, x3, [x16, #16]
-+	MOV64	x0, (0x90001000 + 1888 * 4320 + (64 + 56 * (\n - 1)) * 4)
++	/*
++	 * ugg's panel: framebuffer 0x90000000, 720x1280, 32 bpp, stride 2880.
++	 * Put the marks on the last visible row (1272) starting 64 px in, so they
++	 * never collide with the scrolling early console above them.
++	 * 2880 is not an add immediate: build it in two steps like before.
++	 */
++	MOV64	x0, (0x90000000 + 1272 * 2880 + (64 + 56 * (\n - 1)) * 4)
 +	MOV64	x1, \color
-+	mov		x2, #32
++	mov		x2, #8
 +Lugg_mark_row\@:
 +	mov		x3, #48
 +	mov		x17, x0
@@ -2318,8 +2325,8 @@ index 023086f..59f628e 100644
 +	str		w1, [x17], #4
 +	subs	x3, x3, #1
 +	b.ne	Lugg_mark_px\@
-+	add		x0, x0, #4096
-+	add		x0, x0, #224						// stride 4320 (not an add immediate)
++	add		x0, x0, #2048
++	add		x0, x0, #832						// stride 2880 (2048 + 832)
 +	subs	x2, x2, #1
 +	b.ne	Lugg_mark_row\@
 +	dsb		sy
@@ -2334,19 +2341,30 @@ index 023086f..59f628e 100644
  .macro MSR_TCR_EL1_X1
  #if defined(KERNEL_INTEGRITY_KTRR)
  	mov		x0, x1
-@@ -515,7 +544,11 @@ LEXT(start_first_cpu)
+@@ -515,10 +550,21 @@ LEXT(start_first_cpu)
  
  #if defined(SWEET)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
 +#if defined(UGG)
-+	MOV64	x0, (0x90001000 + 1888 * 4320)		/* ugg fb, 32 rows above the bottom */
++	/*
++	 * ugg: framebuffer 0x90000000, 720x1280, 32 bpp, stride 2880. The band is
++	 * 64x32 at the bottom-left, i.e. row 1248. Keep it inside the panel: the
++	 * mido values (0x90001000 + 1888*4320) would write past 0x91400000 here.
++	 */
++	MOV64	x0, (0x90000000 + 1248 * 2880)
++	mov		x4, #2048
++	add		x4, x4, #832						/* stride 2880 */
 +#else
  	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	mov		x4, #4320
 +#endif
  	mov		w1, #-1
  	mov		x2, #32
- 	mov		x4, #4320
-@@ -536,6 +569,7 @@ Lsweet_mark_pixel:
+-	mov		x4, #4320
+ Lsweet_mark_row:
+ 	mov		x3, #64
+ 	mov		x5, x0
+@@ -536,6 +582,7 @@ Lsweet_mark_pixel:
  	adrp	x0, EXT(LowExceptionVectorBase)@page
  	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
  	MSR_VBAR_EL1_X0
@@ -2354,7 +2372,7 @@ index 023086f..59f628e 100644
  
  
  	// Get the kernel memory parameters from the boot args
-@@ -686,6 +720,26 @@ Lkernelcache_base_found:
+@@ -686,6 +733,26 @@ Lkernelcache_base_found:
  	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
  	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
  	 */
@@ -2381,7 +2399,7 @@ index 023086f..59f628e 100644
  	MOV64	x10, 0x9c000000
  	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
  	orr		x11, x11, x10
-@@ -693,12 +747,14 @@ Lkernelcache_base_found:
+@@ -693,12 +760,14 @@ Lkernelcache_base_found:
  	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
  	add		x13, x25, #(2 * PGBYTES)
  	str		x11, [x13, x12, lsl #TTE_SHIFT]
@@ -2396,7 +2414,7 @@ index 023086f..59f628e 100644
  	b		common_start
  
  /*
-@@ -770,6 +826,7 @@ common_start:
+@@ -770,6 +839,7 @@ common_start:
  	isb
  	tlbi	vmalle1
  	dsb		ish
@@ -2404,7 +2422,7 @@ index 023086f..59f628e 100644
  
  
  #if defined(BCM2837)
-@@ -832,10 +889,12 @@ common_start:
+@@ -832,10 +902,12 @@ common_start:
  	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
  #endif /* HAS_APPLE_PAC */
  
@@ -2417,7 +2435,7 @@ index 023086f..59f628e 100644
  
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -899,6 +958,7 @@ common_start:
+@@ -899,6 +971,7 @@ common_start:
  	mov	lr, x21
  #endif
  
