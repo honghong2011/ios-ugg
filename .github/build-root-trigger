@@ -1,4 +1,2 @@
-Bump this file (or push to .github/workflows/build-root.yml) to start a root-image build.
-The workflow needs a push trigger because workflow_dispatch only works for workflows
-that exist on the default branch, and this one lives on ugg-port.
-2026-11-14T19:35:44.760Z
+Bump to start a root-image build.
+2026-11-14T19:39:21Z

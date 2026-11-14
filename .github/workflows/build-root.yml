@@ -85,9 +85,11 @@ jobs:
         # for a device and version. `ipsw download ipsw --url-only` does not
         # exist (checked the released binary), so do not use that.
         env:
-          IPFW_URL: ${{ inputs.ipsw_url }}
-          DEVID: ${{ inputs.device }}
-          IOSVER: ${{ inputs.version }}
+          # Fallbacks are required: a push trigger supplies no inputs, and an
+          # empty DEVID makes the API call /device/?type=ipsw, which is a 404.
+          IPFW_URL: ${{ inputs.ipsw_url || '' }}
+          DEVID: ${{ inputs.device || 'iPhone10,4' }}
+          IOSVER: ${{ inputs.version || '16.7.16' }}
         run: |
           mkdir -p work/ipsw
           URL="$IPFW_URL"
@@ -103,7 +105,7 @@ jobs:
       - name: Extract the three system images
         run: |
           unzip -q -o work/ipsw/fw.ipsw -d work/ipswext
-          python3 tools/ipsw_roles.py work/ipswext "${{ inputs.device }}"
+          python3 tools/ipsw_roles.py work/ipswext "${{ inputs.device || 'iPhone10,4' }}"
           for role in OS SYSTEMOS APPOS; do
             f="work/ipswext/$(cat work/ipswext/$role.path)"
             ln -sf "$(realpath "$f")" "work/ipswext/$role.dmg"
