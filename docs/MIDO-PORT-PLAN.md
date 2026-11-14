@@ -1430,3 +1430,76 @@ mido 的日志（PORTING_LOG 574-576）：
 `sweet_log_start()` 在**分区找到之后、input 初始化之前**调用，
 环形缓冲在 RAM（`sweet_log_ring`），定期刷到分区末尾 4100 KiB。
 所以即使 GUI 起不来，日志也能通过 recovery 拉出来。
+
+---
+
+## 27. ★★★★★ 第 14 轮：QEMU 跑通到 M2 —— 根因是 phys_base 的 L1 索引不匹配
+
+### 27.1 结果
+
+`qemu-verdict`: **kernel is drawing text on the early console**
+`qemu-text`: **38 行非空、38 行含字母数字**
+
+屏幕解码出的内容（节选，按内核实际顺序）：
+
+```
+bsd_init: calling skywalk_init
+bsd_init: calling memorystatus_init
+bsd_init: calling sysctl_mib_init
+bsd_init: calling bsd_autoconf
+bsd_init: calling loopattach
+ifnet_attach: ... lo0 / gif0 / stf0 ...
+bsd_init: calling inittodr
+bsd_init: calling setconf
+Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string>
+             <key>Content</key><string ID="2">Apple_HFS</string></dict>
+```
+
+**这就是 M2：`bsd_init` 全部跑完，停在「等待 IOMedia / Apple_HFS」。**
+
+### 27.2 真根因：`phys_base` 落在不同的 1 GiB L1 区
+
+`start.s` 映射 framebuffer 的方式是：把 4 个 L2 block 条目写进 **「第一个 L2 页」**
+（`bootstrap_pagetables + 2*PGBYTES`），注释里假设 **fb 和 RAM 窗口共享同一个 L1 条目**。
+
+| 环境 | RAM phys_base | L1 索引 | FB 0x90000000 的 L1 索引 | 结果 |
+|---|---|---|---|---|
+| **真机** | `0xA0000000` | **2** | **2** | 相同 ✅ 代码正确 |
+| **QEMU（之前）** | `0x50000000` | **1** | **2** | **不同 ❌** |
+
+`phys_base = 0x50000000` 时，那 4 个 block 条目被写进了 RAM 的 L2 表里**fb 的槽位索引处**
+—— 表错了，framebuffer 根本没被映射。内核一开 MMU 就取指失败。
+
+这与 QEMU 日志完全吻合：
+
+| 日志 | 解释 |
+|---|---|
+| `FAR = ELR = 0x5042c5e4` | 物理地址（`0x50000000` 布局下的 fb 槽位附近） |
+| 该 VA 处指令是 `isb` | 前一条正是 `msr SCTLR_EL1`，**MMU 刚打开那一刻** |
+| 之后 4000 条 undefined | 异常分发器 `fleh_dispatch64+0x3c` 自陷的连锁反应 |
+
+### 27.3 修复与附带收益
+
+`QEMU_PHYS_BASE` 从 `0x50000000` 改为 **`0xA0000000`**（真机的值）。
+
+约束全部核对：
+
+| 约束 | 值 |
+|---|---|
+| 在 `0x80000000..0xBFFFFFFF`（L1 索引 2）内 | ✅ |
+| 高于 20 MiB splash 区（`0x90000000..0x91400000`） | ✅ |
+| `0xA0000000 + 0x1ff00000 = 0xBFF00000` 仍在同一 L1 区 | ✅ 只需 1 个 L2 页 |
+
+**附带收益**：QEMU 现在跑的是**真机的完整地址布局**（同 phys_base、同 mem_size），
+所以 QEMU 通过才真的对真机有意义。
+
+### 27.4 为什么之前一直没发现
+
+前几轮我在改内核代码（framebuffer 地址、mark 越界、commpage 诊断），
+那些都是**真实的 bug**，但**都不是 QEMU 黑屏的原因**。
+
+真正的原因是我给 QEMU 喂了一个**与真机不同的地址布局**，
+而内核里恰好有依赖「RAM 与 fb 同 L1 区」的假设。
+
+教训：**QEMU 的价值完全取决于它跑的是不是真机的地址布局。**
+只对齐「内存大小」不够，`phys_base` 的 L1 索引也必须对齐。

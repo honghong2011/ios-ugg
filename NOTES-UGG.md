@@ -1,5 +1,84 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 05:30，第 14 轮）-- QEMU 跑通到 M2，真机应同样
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1505 行）。
+
+### 重大进展：内核在 QEMU 里跑到了「等待根设备」
+
+```
+qemu-verdict  kernel is drawing text on the early console
+qemu-text     38 行非空，38 行含字母数字
+```
+
+屏幕解码出的末尾（内核实际顺序）：
+
+```
+bsd_init: calling inittodr
+bsd_init: calling setconf
+Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string>
+             <key>Content</key><string ID="2">Apple_HFS</string></dict>
+```
+
+**这就是 M2。** pmap、VM bootstrap、IOKit、`bsd_init` 全部跑完，停在找 HFS 分区。
+
+### 根因：`phys_base` 落在不同的 1 GiB L1 区（不是内核 bug）
+
+`start.s` 把 framebuffer 的 4 个 L2 block 写进「第一个 L2 页」，
+**假设 RAM 和 fb 共享同一个 L1 条目**。
+
+| 环境 | phys_base | RAM 的 L1 索引 | fb 的 L1 索引 | |
+|---|---|---|---|---|
+| 真机 | `0xA0000000` | 2 | 2 | ✅ 相同 |
+| QEMU（之前） | `0x50000000` | **1** | **2** | ❌ 不同 |
+
+不同索引 ⇒ 那 4 个 block 写进了 RAM 的 L2 表里 fb 的槽位 —— 表错了，fb 没映射，
+内核一开 MMU 就取指失败。与日志完全吻合（FAR 是物理地址、该处是 `isb`、前面是 `msr SCTLR_EL1`）。
+
+**修复**：`QEMU_PHYS_BASE` 改为 `0xA0000000`（真机的值）。
+
+### 为什么这个结果对真机有参考价值（已实测确认）
+
+| 项 | 真机 payload | QEMU payload |
+|---|---|---|
+| phys_base | `0xa0000000` | `0xa0000000` |
+| mem_size | `0x5ff00000` | `0x5ff00000` |
+| entry | `0xfffffff00742a488` | 同 |
+| kernel_end | `0xfffffff0084b4000` | 同 |
+| **段表** | 10 段 | **完全相同** |
+
+两者**只差 ADT 里的 GIC 地址（0x0b000000 vs 0x08000000）和时基（19.2 vs 62.5 MHz）**，
+那是硬件差异，不影响内核被加载到哪里。
+
+**⇒ QEMU 能跑到 M2，真机没有理由跑不到。**
+
+### 这也说明前几轮修的 bug 是对的
+
+前几轮修的 framebuffer 地址、mark 越界、MDP 32bpp、eMMC 初始化、L6 电源，
+**都不是 QEMU 黑屏的原因**，但它们都是真 bug —— 现在内核能在正确的地址布局下
+跑完全程，说明这些修复没有引入回归。
+
+### 镜像（不变，仍然是这个）
+
+```
+shim-boot-0082-mido.img  8,169,472 B
+sha256 3fa935772411dadfdda6d14ac1fbcd0126fa6e252bcb9be1b5550ee119f453a4
+```
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+预期：**停在 `Still waiting for root device`（M2）** —— 因为还没刷根卷。
+
+### 根卷（不变，已就绪）
+
+artifact `ios16-root-parts`（run 43634756880），11,970,598,900 B，7 片，**有效期到 11/19**。
+需 20 GB 空闲盘：`./ugg/flash-root.sh /path/with/20GB`
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 05:20，第 13 轮完）-- 刷这个镜像
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1432 行）。
