@@ -896,3 +896,64 @@ QEMU_MEM_SIZE  0x20000000 (512 MiB)  ->  0x60000000 (1.5 GiB)
    「prefetch abort 之后」自己崩掉的表现。正确做法：用 FAR/ELR 换算成符号。
 3. **1.16 GB 的日志是线索不是噪音。** 4000 条重复异常说明陷入了异常风暴，
    而风暴的**第一条**（Prefetch Abort，只出现 1 次）才是根因。
+
+---
+
+## 18. QEMU 的精确诊断（1.5 GiB 配置下依然复现，但根因已定位到符号级）
+
+### 18.1 事实
+
+| 项 | 值 |
+|---|---|
+| 内存 | 已改 1.5 GiB（与真机一致），`X24=0x5fefc000` 证明生效 |
+| 第一条异常 | **Prefetch Abort**，只有 1 次 |
+| `FAR` = `ELR` | **0x5042c5e4**（物理地址） |
+| 换算成 VA | 0xfffffff00742c5e4 = **`common_start + 0x198`** |
+| 第二条及以后 | 4000 条 `Undefined Instruction`，`ELR = fleh_dispatch64 + 0x3c` |
+
+### 18.2 因果链（不是猜测）
+
+`
+1. 内核把 commpage 的 **物理地址**（0x5042c5e4）当成 VA 去取指
+2. -> Prefetch Abort（FAR = 那个物理地址）
+3. -> 跳到异常向量 0xfffffff007425000
+4. -> 异常分发器 fleh_dispatch64+0x3c 自己又触发 Undefined Instruction
+5. -> 循环 4000 次（qemu.log 1.16-1.44 GB 全是这个）
+`
+
+**第 1 步才是根因，第 2-5 步都是连锁反应。**
+
+### 18.3 为什么这指向 commpage_populate
+
+`common_start` 是 commpage 文本区的符号。内核**只有在
+`vm_commpage_init → vm_commpage_text_init → pmap_create_commpages → commpage_populate`
+这条链上才会碰它。而 `pmap_create_commpages` 正是 mido 打过补丁的地方：
+
+`
+#if defined(UGG_BOARD)
+    text_leaf_index &= ~(PAGE_RATIO - 1);   /* VM-page 对齐 */
+#endif
+`
+
+这个补丁要求 `PAGE_RATIO > 1`（即 16K VM over 4K granule）。如果实际跑的是 4K VM
+（`PAGE_RATIO == 1`），该补丁是空操作，commpage 的 leaf index 没有按 VM 页对齐，
+PTE 写到了错误的位置 —— 与观测完全吻合。
+
+### 18.4 需要确认的一件事
+
+QEMU 里实际生效的 `PAGE_RATIO` 是多少。已知：
+
+| 条件 | 来源 |
+|---|---|
+| `-DUGG_4K_VM` 已定义 | MakeInc.def 第 70 行 |
+| 它影响 `MACH_VM_MAX_ADDRESS` 和 zalloc/compressor 的尺寸 | vm_param.h:136, zalloc.c:163, vm_kern.c:3592/3680, vm_compressor.c:833 |
+| 它**不影响** `PAGE_SHIFT_CONST` | arm_init.c 只看 `memSize > 1 GiB` |
+
+所以 1.5 GiB 时 `PAGE_SHIFT_CONST = PAGE_MAX_SHIFT = 14`，`PAGE_RATIO = 4`，
+补丁**应当**生效。那问题在别处 —— 需要下一轮在
+`pmap_create_commpages` 里加打印才能定位。
+
+### 18.5 我的判断
+
+这个问题**只在 QEMU 暴露**，真机可能根本走不到（真机连 stage-0 白带都还没验证过）。
+继续在 QEMU 深挖的性价比不高，**优先让真机跑一次**，用真实屏显判断卡在哪。

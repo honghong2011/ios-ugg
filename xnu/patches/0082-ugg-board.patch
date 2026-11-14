@@ -1938,7 +1938,7 @@ index da0bbba..48c4285 100644
  
  	mov		x0, #-1			// Failed
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 00568d3..6557df9 100644
+index 00568d3..2c11ae5 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -10892,6 +10892,9 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
@@ -1951,6 +1951,25 @@ index 00568d3..6557df9 100644
  
  		// Generate a VA for the commpage text with the same root and twig index as data
  		// comm page, but with new leaf index we've just generated.
+@@ -10908,6 +10911,18 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+ 	kr = pmap_enter_addr(commpage_pmap_default, commpage_text_va, text_pa, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+ 	assert(kr == KERN_SUCCESS);
+ 	// Mark it as global page R/X so that it doesn't get thrown out on tlb flush
++	#if defined(UGG_BOARD)
++	/*
++	 * One line that makes the commpage geometry visible in the early boot text.
++	 * PAGE_SHIFT/PAGE_RATIO decide whether the leaf alignment above is a real fix
++	 * or a no-op, and text_va vs text_pa is what the QEMU boot faulted on (it
++	 * jumped to text_pa as if it were a VA).
++	 */
++	printf("UGG PMAP: commpage vaddr %#llx paddr %#llx leaf %d shift %u ratio %u nptes %d\n",
++	    (unsigned long long)commpage_text_va, (unsigned long long)text_pa,
++	    text_leaf_index, (unsigned)PAGE_SHIFT, (unsigned)PAGE_RATIO, (int)num_ptes);
++	#endif
++
+ 	pmap_update_tt3e(commpage_pmap_default, commpage_text_va, PMAP_COMM_PAGE_TEXT_PTE_TEMPLATE);
+ 
+ 	*user_text_addr = commpage_text_va;
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index 06bb568..2b727c3 100644
 --- a/osfmk/arm64/arm_vm_init.c
