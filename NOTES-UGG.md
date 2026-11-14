@@ -1,5 +1,51 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 02:20，第 7 轮）
+
+> 全部记录：`docs/MIDO-PORT-PLAN.md`（898 行）。本文件下方是历次交接。
+
+### 三件已完成的事
+
+| # | 事情 | 结论 |
+|---|---|---|
+| 1 | **根卷不需要 Linux 电脑** | `probe-rootenv.yml` 实测六项全过（86 GB 磁盘 / hfsplus 可加载 / mkfs / mount / fsck / apfs-fuse 源码构建成功），`build-root.yml` 在 CI 里做 |
+| 2 | **QEMU 早启验证上线** | `-M virt,gic-version=2 -cpu cortex-a53`，解码帧缓冲，报里程碑 |
+| 3 | **修掉四个真实 framebuffer bug** | mido 的 `0x90001000 + 1888*4320` 在 ugg 上**写越界 0x6F100 字节**（超出 splash_region） |
+
+### QEMU 那条「内核挂了」是假警报，已查明
+
+1.16 GB 的 `qemu.log` 里只有**一条** Prefetch Abort，后面 4000 条都是它的连锁反应：
+
+`
+FAR = ELR = 0x5042c5e4          <- 物理地址
+0x5042c5e4 - 0x50000000 + virt_base = 0xfffffff00742c5e4
+符号 = common_start + 0x198     <- commpage
+`
+
+**根因**：`arm_init.c` 只在 `memSize > 1 GiB` 时选 16K VM 页；我给 QEMU 的是 512 MiB，
+于是它测的是 4K VM 路径 —— 而真机是 1.5 GiB / 16K VM。**QEMU 之前测的路径和真机不同。**
+已改成 `QEMU_MEM_SIZE = 0x60000000`，与真机一致。
+
+### 你的那一步（没变）
+
+`
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+8,169,472 B   sha256 7a97fee7a10275996bfcd04423867bfc64d4641732308e5ab7b75d3c3cb10af9
+`
+
+**只进内存。** 没刷根卷 ⇒ **正常应停在 "Still waiting for root device"**（M2）。
+
+| 屏上看到 | 含义 |
+|---|---|
+| 左下角一条 64x32 白带 | stage-0 跑到了（mido 移植标记） |
+| `SWEET EARLY` 01..NN | 早期控制台工作 |
+| `panic:` / 白字滚动 | **拍照给我**，最有价值 |
+| `Still waiting for root device` | **M2 达成** |
+| 黑屏但有背光，等 3 分钟 | 可能已进 XNU |
+
+---
+
+
 ## ★★★★★ 现在的真实状态（2026-11-15 01:50，第 7 轮末）
 
 > 完整计划/记录：`docs/MIDO-PORT-PLAN.md`（830 行）。本轮全部提交已推送 `ugg-port`。
