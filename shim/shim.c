@@ -10,7 +10,11 @@
 #include "console.h"
 #include "mmu.h"
 #include "loader.h"
-#include "ufs.h"
+#include "sdhc.h"
+#include "emmc.h"
+#include "rpm.h"
+#include "perf.h"
+#include "input.h"
 #include "board.h"
 
 #define RESTART_BOOTLOADER	0x77665500U
@@ -434,6 +438,7 @@ void shim_main(uint64_t dtb)
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
+	con_log_init();
 	con_clear(RED);
 #if defined(BOARD_HAS_PROBE)
 	con_str("SHIM", BOARD_NAME " loader + board probe");
@@ -465,12 +470,23 @@ void shim_main(uint64_t dtb)
 	}
 	reset(20);
 #else
-	/* No payload: probe the internal UFS while the MMU is still off. */
-	stage = "ufs";
-	test_ufs();
+	/*
+	 * No payload: characterise the board (bring-up mode). eMMC first, because
+	 * it is what the XNU driver and the root image depend on; then the touch
+	 * rail and pads, which must stay set when we hand off to XNU; then the
+	 * console log ring into the cache partition so the output can be read
+	 * from a host instead of photographed.
+	 */
+	stage = "emmc";
+	ugg_emmc_probe();
 	con_skip();
-	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
-	con_str("UFS", "probe done, reset in ~3 min");
+	stage = "input";
+	input_setup();
+	con_skip();
+	stage = "perf";
+	perf_boost();
+	con_skip();
+	con_str("BRINGUP", "done, reset in ~3 min");
 	delay_ms(180000);
 	reset(20);
 #endif
