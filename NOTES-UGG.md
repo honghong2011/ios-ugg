@@ -1,5 +1,63 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 03:30）-- 镜像已更新，请刷这个
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1002 行）。
+
+### 你的那一步
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+8,169,472 B
+sha256 e91b0d5fb2d40800f7fe374822860019b3bfaf3377de9cdcbba947139e46ec0e
+```
+
+**这个镜像和上一版不同**：修掉了 5 个 framebuffer 地址 bug（见下），务必刷这个新的。
+
+### 本轮修掉的 5 个真 bug（真机同样会中）
+
+| # | 位置 | 问题 | 后果 |
+|---|---|---|---|
+| 1 | `start.s` UGG_MARK | `0x90001000 + 1888*4320`，stride 4320 | 写越界 0x6F100 字节，超出 splash_region |
+| 2 | `start.s` stage-0 白带 | 同上 | 同上 |
+| 3 | `sweet_early.c` `sweet_early_mark` | `stage*48` 到 `(stage+1)*48`，stage 最大 20 ⇒ x 到 **1008** | **超出 720 宽 288 像素**，绕行后越出 framebuffer |
+| 4 | `SweetFramebuffer.cpp` MDP 回退 | `0x90001000` / `4320` | 错地址 |
+| 5 | `mkadt_ugg.py` QEMU 模式 | 512 MiB ⇒ 实际测 4K VM 路径 | QEMU 测的不是真机路径 |
+
+bug 3 尤其严重：mido 的面板 1080 宽能放 22 个 48px 方块，ugg 只有 720 宽只能放 15 个，
+而 stage 能到 20 —— **只要有 stage>=15 就必然越界写**。
+
+### 另外两件重要的事
+
+**1. 根卷不需要 Linux 电脑了**
+
+`probe-rootenv.yml` 在免费 ubuntu runner 上实测六项全过：
+86 GB 磁盘 / hfsplus 可加载 / mkfs / mount / fsck / apfs-fuse 源码构建成功。
+`build-root.yml` 一条命令出 16 GB 根卷，切 1.8 GB 片上传。
+
+**2. QEMU 早期启动验证已上线，但尚未通过**
+
+已排除：内存大小、framebuffer 地址、mark 越界、commpage 补丁。
+诊断埋点已加（`UGG PMAP: commpage ...`），但这行**没出现** ⇒ 故障在 `arm_vm_init` 更早处。
+判断：QEMU 转为回归检查，不阻塞真机。真机屏显才是判据。
+
+### 屏显判读
+
+| 看到 | 含义 |
+|---|---|
+| 左下角 64x32 白带 | stage-0 跑到了 |
+| 底部一排（或两排）绿色方块 | `sweet_early_mark` 在工作，数字越大越靠后 |
+| `SWEET EARLY 01..NN: 标签` | 早期控制台 + 阶段名 |
+| `panic:` / 白字滚动 | **拍照给我**，最有价值 |
+| `Still waiting for root device` | **M2 达成** |
+| 黑屏但有背光，等 3 分钟 | 可能已进 XNU |
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 02:20，第 7 轮）
 
 > 全部记录：`docs/MIDO-PORT-PLAN.md`（898 行）。本文件下方是历次交接。
