@@ -138,7 +138,9 @@ jobs:
         # mkiosroot.sh does the apfs-fuse mounts, the rsync merge and applies
         # nothing else; sweet-root-tweaks.py then does the bring-up changes.
         run: |
-          sudo -E ./ugg/tools/mkiosroot.sh \
+          # mkiosroot.sh calls sudo itself for every mount/rsync, so do NOT
+          # wrap it: a nested sudo has no tty on the runner and hangs.
+          ./tools/mkiosroot.sh \
             work/ipswext/OS.dmg work/ipswext/SYSTEMOS.dmg work/ipswext/APPOS.dmg \
             work/ios16-root.img 16G
           sudo fsck.hfsplus -fy work/ios16-root.img || true
@@ -147,7 +149,7 @@ jobs:
         run: |
           sudo mkdir -p work/mnt
           sudo mount -t hfsplus -o loop,force work/ios16-root.img work/mnt
-          sudo python3 ./ugg/tools/sweet-root-tweaks.py work/mnt
+          sudo python3 ./tools/sweet-root-tweaks.py work/mnt
           sync
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
