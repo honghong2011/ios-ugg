@@ -1173,3 +1173,86 @@ QEMU 的 1.5 GiB 布局让某段代码路径落入这个不自洽的组合。
 
 > 注：日志里 `warning: no mobileactivationd system container in the image; skipped data ark`
 > 是 mido 也有的同类警告，不影响启动（激活走 mobileactivationd 的 Hactivation 分支）。
+
+---
+
+## 23. ★★★ 第 10 轮：找到会让「等待根设备」永久卡住的根因
+
+### 23.1 问题
+
+`shim_main()` 把 `loader_boot(dtb)` 放在**第一条语句**，而 board bring-up
+（eMMC 初始化、触摸电源）只在「没有 payload」的分支里执行。
+
+所以**手机带 payload 启动时，eMMC 从未被初始化**。
+
+### 23.2 证据（不是推测，是代码自己写的）
+
+`bsd/dev/sweet_ufs.c` 的 `ugg_take_over()`：
+
+```c
+/* Data timeout counter to the maximum; long write-busy phases must not abort */
+mh_wr(M_CLK, ...);
+int e = ugg_card_ready(500);
+if (e) {
+    printf("UGG EMMC: card not in transfer state after the shim (%d)\n", e);
+    return ENXIO;
+}
+```
+
+**「after the shim」这几个字就是答案** —— XNU 假设 shim 已经把卡初始化到 transfer state，
+它自己**只调超时计数器**，不跑 CMD0/CMD1/CMD2/CMD3/CMD7、不开 bus power、不配 SDCC1 RCG。
+
+mido 的 shim_main 正是这么做的（第 449 行 `test_emmc()`，第 460 行才 `loader_boot()`）。
+
+### 23.3 后果
+
+| 现象 | 解释 |
+|---|---|
+| `Still waiting for root device` 永远不出来 | 卡没进 transfer state，`ugg_read_blocks` 全部失败 |
+| 即使刷了 16 GB 根卷也一样 | 读不到 GPT，找不到 `userdata` |
+| 用户会以为是根卷问题 | 实际是 shim 少做一步 |
+
+**这个 bug 会让前面所有工作（内核、补丁、根卷）全部白费。**
+
+### 23.4 修复
+
+`shim_main()` 改为在跳转前无条件执行：
+
+```
+stage = "emmc";   ugg_emmc_probe();   // sdhc_init: core reset, HC mode, bus power,
+                                     // VENDOR_SPEC 1.8V pads, SDCC1 RCG 400kHz,
+                                     // CMD0/CMD1/CMD2/CMD3(RCA 2)/CMD7 -> TRAN
+stage = "input";  input_setup();     // RPM L10 + L6, QUP3 clocks, pads
+stage = "perf";   perf_boost();      // currently a no-op
+stage = "loader"; loader_boot(dtb);  // jump
+```
+
+### 23.5 第二个同类问题：L6 没开
+
+`bsd/dev/ugg_input.c` 的注释写着 shim 会准备
+「RPM ldoa10 2.85 V（touch vdd_ana）、**ldoa6 1.8 V（vcc_i2c）**」，
+但 shim 只投了 L10。
+
+UGG 的 DTB 明确：`goodix@5d` 的 `vcc_i2c-supply` = `regulator-l6`（1.8 V）。
+没有这路电，QUP3 的上拉没有源，总线恒读 0xFF —— 表现为「驱动写错了」，
+实际是电源没给。
+
+已补：`rpm_ldo_enable(6, 1800000, 40)`，结果与 L10 一起打印，失败不致命
+（仍会打印 touch IC id，日志里能看出是电源问题）。
+
+> 注：mido 的 input.c 只**读** L6（`ldo_diag(" L6 ", 0x145)`），
+> 因为那块板子上 OrangeFox 已经把它留在开启状态。UGG 在 LK 之后没有这个保证。
+
+### 23.6 教训
+
+**「驱动依赖 shim 做的准备」是本项目最容易漏的一类 bug。**
+排查方法：在 XNU 驱动里搜 `after the shim`、`the shim`、`shim left` 这类注释，
+每一条都对应 shim 里必须有的一步。
+
+已知的三条：
+
+| XNU 侧 | 依赖 shim 做的 | 状态 |
+|---|---|---|
+| `sweet_ufs.c` `ugg_take_over()` | eMMC 初始化到 transfer state | ✅ 已修 |
+| `ugg_input.c` 头注释 | L10 + **L6** 两路电源 | ✅ 已修 |
+| `ugg_input.c` 头注释 | QUP3 时钟、gpio10/11/64/65 引脚 | ✅ 原本就有 |
