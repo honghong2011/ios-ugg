@@ -490,3 +490,165 @@ grep -rn '<new_ident>(' --include='*.c' --include='*.cpp' . | grep -v extern
 `
 
 4. **本地 grep 出来的宏名要用词边界**。之前用 `grep -oE 'MIDO_?[A-Z0-9_]*'` 把 `DEBUGGER` 里的 `UGGER` 也逮到，虚惊一场。
+
+---
+
+## 11. 文件清单（谁该看哪个）
+
+| 文件 | 行数 | 作用 |
+|---|---|---|
+| `ugg/docs/MIDO-PORT-PLAN.md` | 492 | **本文件**。计划 + 执行记录 + CI 迭代 + 判断 |
+| `ugg/NOTES-UGG.md` | 923 | 活跃交接（顶部 68 行是 baru 的路线说明，下面全是旧记录） |
+| `ugg/xnu/patches/0082-ugg-board.patch` | 2906 | **核心产物**。28 文件 +2089/-22，零冲突 |
+| `ugg/xnu/patches/0001-0081` | 84 个 | 上游 ios-sweet 原版，逐字节一致 |
+| `ugg/shim/sdhc.c` | 558 | eMMC 驱动（照抄 mido，零改动） |
+| `ugg/shim/emmc.c` | 163 | UGG 的 GPT 策略（新写） |
+| `ugg/shim/input.c` | 302 | GT9xx 触控（重写） |
+| `ugg/shim/mido_console.c` / `mido_compat.h` | 91 / 36 | console API 兼容层（新写） |
+| `ugg/build-root.sh` | 174 | **交给 Linux 电脑跑的那一个文件** |
+| `ugg/make-image.sh` | 82 | 内核 → 可启动镜像，一条命令 |
+| `ugg/tools/mkadt_ugg.py` | 216 | UGG 的 Apple Device Tree |
+| `ugg/ci/patch_dxb.py` | 24 | 让 libfirehose 按 Cortex-A53 编（无 LSE） |
+| `build-m1/old-ugg-patches/` | 14 个 | 作废的 0082-0098，归档留证 |
+
+### 11.1 一句话验收标准
+
+`
+能进桌面 = 屏上出现 iPhone 锁屏（时钟/日期），上滑后有 App 图标网格，
+        手指在屏上滑动时 SpringBoard 有反应。
+`
+
+### 11.2 从零复现的完整命令
+
+`
+# 内核（CI，免费）
+gh workflow run xnu.yml -R honghong2011/ios-ugg --ref ugg-port -f machine_config=SWEET
+gh run download <RUN_ID> -R honghong2011/ios-ugg -n xnu-kernel -D ci-out
+
+# shim（CI，免费，push 即触发）
+gh run download <SHIM_RUN> -R honghong2011/ios-ugg -n shim-ugg -D shim-out
+
+# 组装（本机）
+./ugg/make-image.sh ci-out/kernel.development.ugg shim-out/Image
+
+# 上机（不上电刷写）
+fastboot boot build/img/shim-boot-ugg.img
+
+# 根卷（Linux 电脑）
+./ugg/build-root.sh /path/with/40GB
+`
+
+---
+
+## 12. ★ 内核编译成功（2026-11-15 00:18，本轮里程碑）
+
+### 12.1 结果
+
+`
+run      43613955911  (commit 5101a2c)
+结果     **success**
+产物     kernel.development.sweet
+大小     17,140,032 B
+sha256   0d8ed3eda477dc7ee0e0279e83b40bbb83452b7612e7e2035ad123a087d83094
+`
+
+### 12.2 三项硬门禁
+
+| # | 门禁 | 期望 | 实际 | 结论 |
+|---|---|---|---|---|
+| 1 | `applied` 计数 | 86（含 0082） | `applied=86` | ✅ |
+| 2 | `patches-skipped` 不含 0082 | 无 | 注解**未出现**（只有 `patches-skipped-foreign`） | ✅ |
+| 3 | 内核含 0082 的标记 | `sweet_early_mark` / `sweet_gic_ack` | 两者都在 | ✅ |
+
+`skipped=4` 全部是 dxb 自带的外来补丁：
+`
+iobuffermemd_monterey.patch
+skywalk_sonoma.patch
+syntax_checker_sonoma.patch
+TrustCache.patch
+`
+这些与我们的补丁链无关，mido 的 CI 也是同样 4 个。
+
+### 12.3 一个注解的坑（别被它骗）
+
+`kernel-machine-configs` 注解显示 `ARM64_ADR ARM64_RET ...` 而**没有** `ARM64_BOARD_CONFIG_SWEET`。
+
+**这不是问题。** 复查旧内核（0098 那版，CI success）得到完全相同的 4 个字符串：
+`ARM64_ADR ARM64_GRANULE_ALLOW_BLOCK ARM64_RET ARM64_RETAB`。
+原因：`-DARM64_BOARD_CONFIG_SWEET` 只影响 `#if defined(...)` 的分支选择，
+**宏名本身不会作为字符串进内核**。这个注解的 `re.findall(rb'ARM64_[A-Z0-9_]+')` 只能捞到
+别处恰好含这些字母的数据。这个检查项本身设计有问题，不是构建出错。
+
+**判断 0082 是否真的生效，正确的方法是查它引入的符号**（见 12.2 第 3 项），
+或者在 `build.log` 里看 `Applying patch: 0082-ugg-board.patch`。
+
+### 12.4 内核大小变化说明什么
+
+| 版本 | 大小 | 说明 |
+|---|---|---|
+| 0098 那版 | 17,711,296 B | 含 UGG 自研的 0082-0098 诊断代码 |
+| **新版** | **17,140,032 B** | 含 mido 的 31 文件改动（+2889 行）+ 我们的 UGG 适配 |
+
+新版**更小**是合理的：旧版塞了 14 个补丁的 fault-report / 双读数区 / 栈扩容等诊断代码，
+新版是干净的 mido 移植 + 少量 UGG 适配。
+
+---
+
+## 13. ★★ 可启动镜像已生成（2026-11-15 00:31）
+
+### 13.1 交付物
+
+`
+文件    build/img/shim-boot-ugg-0082.img
+大小    8,169,472 B
+sha256  7a97fee7a10275996bfcd04423867bfc64d4641732308e5ab7b75d3c3cb10af9
+`
+
+### 13.2 结构校验（全部通过）
+
+| 项 | 值 | 判断 |
+|---|---|---|
+| Android boot magic | `ANDROID!` | ✅ |
+| header_version | `0` | ✅ v0，LK 要的就是这个 |
+| page_size | `2048` | ✅ |
+| kernel_addr | `0x80008000` | ✅ 与库存 boot.img 一致 |
+| tags_addr | `0x80000100` | ✅ |
+| product name | `ugg-shim` | ✅ |
+| kernel section | 8,166,776 B | ✅ |
+| gzip 成员解压 | 6,013,634 → **16,724,960 B** | ✅ |
+| gzip 之后的残留 | 2,153,142 B，魔数 `d00dfeed` | ✅ 就是 DTB bundle |
+| 第一个 DTB 大小 | 247,516 B | ✅ |
+| 解压后 arm64 头 | `ARMd` | ✅ |
+| shim Image 大小 | 184,320 B（text_offset 0，image_size 0x2d000） | ✅ 自洽 |
+| SWEETXNU 魔数 | 在解压区偏移 `0x77b3` | ✅ payload 在 |
+
+### 13.3 payload 的关键参数
+
+`
+XNU 链接地址  0xfffffff007004000      <- **iOS VA 布局**（不是 -2TB 的 macOS 布局）
+入口          0xfffffff00742a488
+kernel_end    0xfffffff0084b4000
+payload 大小  16,528,352 B
+`
+
+链接地址是这一版最重要的自检项：mido 的移植日志里，**链接到 -2TB 会让 MMU 开起来后静默挂死**
+（build #2 的教训）。`0xfffffff007004000` 说明 `MakeInc.def` 对 SWEET 家族保留 iOS 布局这条生效了。
+
+### 13.4 引导参数（CPU 渲染路线）
+
+`
+debug=0xc serial=3 cpus=1 keepsyms=1 -v -enable_kprintf_spam -noprogress
+rd=ufsroot0 ufsrw=1 rootrw=1
+unentitled_ios_sim_launch=1 ignition_level=1
+wdt_test=no_user_checkin wdt=-1 launchd_unsecure_cache=1
+sweetfb_noconsole=1 sweetfb_hz=15
+`
+
+| 参数 | 为什么这样设 |
+|---|---|
+| `cpus=1` | mido 明确写了：EL0 LSE 模拟器**不是多核原子的**，在做出 stop-the-world 之前用户态必须单核 |
+| `rd=ufsroot0` | 沿用 mido/sweet 的变量名，底层是我们的 SDHCI eMMC 传输层 |
+| `sweetfb_noconsole=1` | 不让内核文字盖住 GUI，日志走持久环 |
+| `sweetfb_hz=15` | mido 实测 30 Hz 会把单核 A53 压满导致 eMMC 超时、触摸延迟数分钟 |
+| `wdt=-1` | 关硬件看门狗，慢启动不能被它杀掉 |
+| 没有 `midogpu=1` | 我们删了 GPU |

@@ -212,9 +212,12 @@ jobs:
           # -DARM64_BOARD_CONFIG_UGG actually drove the build.
           seen = sorted(set(re.findall(rb'ARM64_[A-Z0-9_]+', blob)))
           ann('notice', 'kernel-machine-configs', ' '.join(s.decode() for s in seen[:20]))
+          # Names introduced by 0082-ugg-board.patch. The GICv2 entry points are
+          # ugg_gic_* (0082 renames mido's mido_gic_*), and -DUGG_BOARD never
+          # appears as a string, so check the symbols instead of the macro.
           marks = [s.decode() for s in
-                   (b'sweet_gic_ack', b'sweet_gic_eoi', b'sweet_gic_send_sgi',
-                    b'sweet_early_mark', b'sweet_early_panic', b'ARM64_BOARD_CONFIG_UGG')
+                   (b'ugg_gic_ack', b'ugg_gic_eoi', b'ugg_gic_send_sgi',
+                    b'ugg_vm4k', b'UGG INPUT', b'UGG EMMC', b'sweet_early_mark')
                    if s in blob]
           ann('notice', 'kernel-ugg-symbols', ' '.join(marks) or '(none found)')
           PY
