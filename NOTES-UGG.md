@@ -1,5 +1,87 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 04:20，第 8 轮）-- 根卷已构建出来，可以刷了
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1114 行）。
+
+### 现在的状态：所有构建产物都齐了
+
+| 产物 | 状态 | 位置 |
+|---|---|---|
+| XNU 内核 | ✅ | CI run 43629928191，17,140,032 B |
+| shim | ✅ | CI run 43614156236，184,320 B |
+| **boot.img** | ✅ | **工作区根目录 `shim-boot-0082-mido.img`，8,169,472 B** |
+| **iOS 根卷** | ✅ | **CI run 43634756880，11,970,598,900 B，7 个分片** |
+
+### 你要做的三步
+
+**1. 刷 boot.img 看屏显（可先做，不依赖根卷）**
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+sha256 e91b0d5fb2d40800f7fe374822860019b3bfaf3377de9cdcbba947139e46ec0e
+```
+
+没刷根卷 ⇒ **正常应停在 "Still waiting for root device"**（M2 达成）。
+
+**2. 下载并校验根卷**
+
+⚠️ **注意磁盘**：本机 C: 只剩 7.3 GB，装不下 11.2 GB 的镜像。
+请在有 20 GB 以上空闲空间的机器/盘上做：
+
+```
+./ugg/flash-root.sh /path/with/20GB
+```
+
+或者手动：
+
+```
+gh run download 43634756880 -R honghong2011/ios-ugg -n ios16-root-parts -D parts
+cd parts && sha256sum -c SHA256SUMS
+cat ios16-root.simg.part* > ../ios16-root.simg
+stat -c%s ../ios16-root.simg     # 必须是 11970598900
+```
+
+**3. 刷入并启动**
+
+```
+fastboot getvar partition-size:userdata    # 确认够大
+fastboot -S 256M flash userdata ios16-root.simg
+fastboot boot shim-boot-0082-mido.img
+```
+
+会清空 Android 数据（你已批准）。刷 10-15 分钟，首启 4-8 分钟。
+
+### 根卷的实测数据（不是估计）
+
+| 项 | 值 |
+|---|---|
+| HFS+ 镜像 | 17,179,869,184 B（16 GiB） |
+| fsck | 三次全部 `The volume iOSRoot appears to be OK.` |
+| sparse 镜像 | 11,970,598,900 B |
+| 分片 | 6 × 1,887,436,800 + 1 × 645,978,100 = 7 片 |
+| 校验 | 每片 sha256，`sha256sum -c` 全过 |
+| CI 步骤 | **11/11 success** |
+| 合成耗时 | 不到 3 分钟（比 mido 本地快得多） |
+
+### 屏显判读
+
+| 看到 | 含义 |
+|---|---|
+| 左下角 64×32 白带 | stage-0 跑到了 |
+| 底部绿色方块（数个数） | `sweet_early_mark` 的阶段号 |
+| `SWEET EARLY 01..NN: 标签` | 早期控制台工作 |
+| `panic:` | **拍照给我** |
+| `Still waiting for root device` | **M2**（没刷根卷时的正常终点） |
+| 苹果 logo | 根卷挂载成功，进 M3/M4 |
+| 锁屏 / 桌面 | **目标达成** |
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 03:30）-- 镜像已更新，请刷这个
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1002 行）。
