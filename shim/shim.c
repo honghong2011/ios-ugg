@@ -446,6 +446,31 @@ void shim_main(uint64_t dtb)
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 #endif
 	con_skip();
+
+	/*
+	 * Board bring-up BEFORE the jump into XNU.
+	 *
+	 * XNU does not initialise the eMMC itself: sweet_ufs.c only resets the
+	 * timeout counter in ugg_take_over() and then expects the card to be in
+	 * the transfer state already (its failure message is "card not in transfer
+	 * state after the shim"), because the shim it was written for ran an eMMC
+	 * init first. Without this step the root device never appears and the
+	 * kernel waits for a root device forever.
+	 *
+	 * The touch rail and pads are set up here too: input_setup() leaves the RPM
+	 * LDO vote and the pin mux in place, which the XNU input driver relies on.
+	 */
+	stage = "emmc";
+	ugg_emmc_probe();
+	con_skip();
+	stage = "input";
+	input_setup();
+	con_skip();
+	stage = "perf";
+	perf_boost();
+	con_skip();
+
+	stage = "loader";
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
@@ -470,22 +495,7 @@ void shim_main(uint64_t dtb)
 	}
 	reset(20);
 #else
-	/*
-	 * No payload: characterise the board (bring-up mode). eMMC first, because
-	 * it is what the XNU driver and the root image depend on; then the touch
-	 * rail and pads, which must stay set when we hand off to XNU; then the
-	 * console log ring into the cache partition so the output can be read
-	 * from a host instead of photographed.
-	 */
-	stage = "emmc";
-	ugg_emmc_probe();
-	con_skip();
-	stage = "input";
-	input_setup();
-	con_skip();
-	stage = "perf";
-	perf_boost();
-	con_skip();
+	/* No payload: the bring-up above already ran; just hold the screen. */
 	con_str("BRINGUP", "done, reset in ~3 min");
 	delay_ms(180000);
 	reset(20);
