@@ -530,10 +530,10 @@ index 6b926fe..266e24a 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..82fff61
+index 0000000..7a8a105
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,451 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
@@ -724,7 +724,7 @@ index 0000000..82fff61
 +		(uint16_t)(reg >> 8),
 +		(uint16_t)(T_STOP | (reg & 0xff)),
 +	};
-+	int e = qup_xfer(w, 3, NULL, 0);
++	int e = qup_xfer(w, 3, 0, 0);
 +	if (e) {
 +		return e;
 +	}
@@ -742,36 +742,18 @@ index 0000000..82fff61
 +static int
 +gt_write(uint16_t reg, const uint8_t *buf, int n)
 +{
-+	uint16_t tags[2 + 1 + 8];
-+	int t = 0;
-+	tags[t++] = (uint16_t)(T_START | (GT_ADDR << 1));
-+	tags[t++] = (uint16_t)(reg >> 8);
-+	if (n <= 0) {
-+		tags[t++] = (uint16_t)(T_STOP | (reg & 0xff));
-+		return qup_xfer(tags, t, NULL, 0);
-+	}
-+	tags[t++] = (uint16_t)(reg & 0xff);
-+	int nw = n > 8 ? 8 : n;
-+	for (int i = 0; i < nw; i++) {
-+		tags[t++] = (uint16_t)((i + 1 == n) ? (T_STOP | buf[i]) : buf[i]);
-+	}
-+	return qup_xfer(tags, t, NULL, 0);
-+}
-+atic int
-+gt_write(uint16_t reg, const uint8_t *buf, int n)
-+{
 +	uint16_t w[4];
 +	w[0] = (uint16_t)(T_START | (GT_ADDR << 1));
 +	w[1] = (uint16_t)(reg >> 8);
 +	w[2] = n > 0 ? (uint16_t)(reg & 0xff) : (uint16_t)(T_STOP | (reg & 0xff));
 +	if (n <= 0) {
-+		return qup_xfer(w, 3, NULL, 0);
++		return qup_xfer(w, 3, 0, 0);
 +	}
 +	w[3] = (uint16_t)(T_STOP | buf[0]);
-+	int e = qup_xfer(w, 4, NULL, 0);
++	int e = qup_xfer(w, 4, 0, 0);
 +	for (int i = 1; i < n; i++) {
 +		uint16_t m[1] = { (uint16_t)(i + 1 == n ? (T_STOP | buf[i]) : buf[i]) };
-+		e = qup_xfer(m, 1, NULL, 0);
++		e = qup_xfer(m, 1, 0, 0);
 +		if (e) {
 +			return e;
 +		}
@@ -857,7 +839,7 @@ index 0000000..82fff61
 +	uint64_t deadline;
 +	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
 +	(void)assert_wait_deadline(&input_chan, THREAD_UNINT, deadline);
-+	thread_block(THREAD_CONTINUE_NULL);
++	thread_block(THREAD_CONTINUE_0);
 +}
 +
 +static void
@@ -998,7 +980,7 @@ index 0000000..82fff61
 +	    pid[0] ? pid[0] : '?', pid[1] ? pid[1] : '?', pid[2] ? pid[2] : '?',
 +	    pid[3] ? pid[3] : '?', e, pon_chan, rd(gpio85, 4) & 1u);
 +	/* Above user threads: a starved poller would add its own delay to every touch. */
-+	if (kernel_thread_start_priority(input_thread, NULL, 81, &thread) == KERN_SUCCESS) {
++	if (kernel_thread_start_priority(input_thread, 0, 81, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	}
 +}
