@@ -8,3 +8,11 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+
+# Apple device trees (iPhone IPSW artifacts, never distributed)
+build/img/*d20ap.adt
+build/img/*d211ap.adt
+build/img/*d22ap.adt
+build/img/*d21ap.adt
+xnu/adt/*.adt
+*.im4p

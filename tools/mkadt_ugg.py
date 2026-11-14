@@ -87,6 +87,25 @@ IDENTITIES = {
 }
 MODEL, TARGET, CANVAS_W, CANVAS_H, TARGET_TYPE = IDENTITIES['iphone8']
 
+# The real device tree (Apple artifact, never committed). ipsw_adt.py produces
+# it from the IPSW; these are the places it may sit. Without it the ADT has no
+# /product node and MobileGestalt-based frameworks misbehave (mido: missing
+# D211AP tree made backboardd crash-loop on a b3a8 surface).
+# HERE is <repo>/ugg/tools, so two levels up is the repo root.
+PRODUCT_CANDIDATES = [
+    os.path.join(HERE, '..', '..', 'build', 'img', 'd20ap.adt'),
+    os.path.join(HERE, '..', '..', 'build', 'img', 'd211ap.adt'),
+    os.path.join(HERE, '..', '..', 'xnu', 'adt', 'd20ap.adt'),
+    os.path.join(HERE, '..', '..', 'xnu', 'adt', 'd211ap.adt'),
+]
+
+
+def find_product():
+    for c in PRODUCT_CANDIDATES:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
+
 u32 = lambda *v: struct.pack('<%dI' % len(v), *v)
 u64 = lambda *v: struct.pack('<%dQ' % len(v), *v)
 cstr = lambda s: s.encode() + b'\0'
@@ -242,7 +261,12 @@ if __name__ == '__main__':
     if '--iphone8plus' in sys.argv:
         MODEL, TARGET, CANVAS_W, CANVAS_H, TARGET_TYPE = IDENTITIES['iphone8plus']
     out = sys.argv[1]
-    prod = sys.argv[sys.argv.index('--product') + 1] if '--product' in sys.argv else None
+    if '--product' in sys.argv:
+        prod = sys.argv[sys.argv.index('--product') + 1]
+    else:
+        prod = find_product()
+        if prod:
+            print('using device tree %s for /product' % prod, file=sys.stderr)
     qemu = '--qemu' in sys.argv
     blob = adt.serialize(build(product_path=prod, qemu=qemu))
     open(out, 'wb').write(blob)
