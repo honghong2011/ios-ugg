@@ -1,0 +1,63 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2367,6 +2367,59 @@
+     }
+ #endif
+ #endif
++#if defined(SWEET_FAMILY)
++	/*
++	 * pmap_bootstrap() allocates its tables from avail_start and then zeroes
++	 * them through phystokv(), i.e. through the physmap aperture. It keeps
++	 * dying on an unmapped page in there, and every theory so far (stack size,
++	 * table size, mem_size vs real_phys_size, block-mapping range checks) has
++	 * been disproved by measurement. What has never been observed directly is
++	 * the ptov_table itself: the windows granular_prot actually mapped.
++	 *
++	 * Print it. If the pmap table PA falls outside every window, that is the
++	 * bug and it is visible immediately. If it falls inside one, the window
++	 * claims to cover it and the hole is at page granularity instead.
++	 */
++	{
++		/*
++		 * Eight windows, three numbers each, do not fit in the ten readout
++		 * slots. Report what actually decides the question instead: for the
++		 * window that contains avail_start, print its bounds, and separately
++		 * print the guard/stack addresses so a 2 MiB block boundary crossing
++		 * is visible.
++		 */
++		unsigned int w = 0;
++		int found = -1;
++
++		for (unsigned int i = 0; i < PTOV_TABLE_SIZE; i++) {
++			if (ptov_table[i].len == 0) {
++				continue;
++			}
++			if ((avail_start >= ptov_table[i].pa) &&
++			    (avail_start < ptov_table[i].pa + ptov_table[i].len)) {
++				found = (int)i;
++			}
++			w++;
++		}
++
++		sweet_early_val(0, "ptovn", (uint64_t)w);
++		if (found >= 0) {
++			/* the window that phystokv(avail_start) resolves through */
++			sweet_early_val(1, "w.pa", (uint64_t)ptov_table[found].pa);
++			sweet_early_val(2, "w.va", (uint64_t)ptov_table[found].va);
++			sweet_early_val(3, "w.len", (uint64_t)ptov_table[found].len);
++			sweet_early_val(4, "w.end", (uint64_t)(ptov_table[found].pa + ptov_table[found].len));
++			sweet_early_val(5, "zerva", (uint64_t)(avail_start - ptov_table[found].pa + ptov_table[found].va));
++		} else {
++			sweet_early_val(1, "w.pa", (uint64_t)-1);   /* NOT IN ANY WINDOW */
++		}
++		sweet_early_val(6, "pstart", (uint64_t)avail_start);
++		sweet_early_val(7, "pb", (uint64_t)physmap_base);
++		sweet_early_val(8, "pe", (uint64_t)physmap_end);
++		sweet_early_val(9, "raend", (uint64_t)real_avail_end);
++	}
++#endif /* SWEET_FAMILY */
++
+ 	sweet_early_mark(12, "calling pmap_bootstrap");
+ 	pmap_bootstrap(dynamic_memory_begin);
+ 	sweet_early_mark(13, "pmap_bootstrap done");
