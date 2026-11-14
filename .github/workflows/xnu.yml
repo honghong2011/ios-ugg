@@ -170,68 +170,6 @@ jobs:
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
 
-      - name: QEMU boot check (GICv2 / cortex-a53)
-        # This is the only automated proof that the kernel gets past its early
-        # path without a phone: start.s -> MMU -> pmap -> boot_args -> bsd_init.
-        # It runs the same SWEETXNU payload the phone boots, on QEMU's virt board
-        # with gic-version=2 and a Cortex-A53, i.e. the same ISA and interrupt
-        # controller family ugg has. It cannot check ugg's own MMIO, eMMC or panel.
-        if: always()
-        run: |
-          set +e
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm llvm
-          KERNEL=$(ls out/kernel.development.* 2>/dev/null | grep -v unstripped | head -1)
-          if [ -z "$KERNEL" ]; then echo '::warning title=qemu::no kernel to boot'; exit 0; fi
-          python3 ugg/tools/mkadt_ugg.py out/qemu.adt --qemu
-          python3 ugg/tools/mkpayload.py "$KERNEL" out/qemu.adt out/qemu-payload.bin \
-            --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -v' || exit 0
-          mkdir -p out/qemu
-          timeout 300 python3 ugg/tools/qemu-ugg.py out/qemu-payload.bin out/qemu \
-            --kernel "$KERNEL" --secs 45 --fail-on-panic > out/qemu/run.txt 2>&1
-          rc=$?
-          echo "qemu exit: $rc"
-          echo '--- decoded screen ---'
-          head -60 out/qemu/fb.txt 2>/dev/null || echo '(no fb.txt)'
-          echo '--- result ---'
-          cat out/qemu/result.json 2>/dev/null || echo '(no result.json)'
-          python3 - <<'PY'
-          import json, os, re
-          def ann(kind, title, body):
-              esc = body.replace('%', '%25').replace(chr(13), '').replace(chr(10), '%0A')
-              print('::%s title=%s::%s' % (kind, title, esc[:40000]))
-          scr = ''
-          if os.path.exists('out/qemu/fb.txt'):
-              scr = open('out/qemu/fb.txt', errors='replace').read()
-          res = {}
-          if os.path.exists('out/qemu/result.json'):
-              try: res = json.load(open('out/qemu/result.json'))
-              except Exception: pass
-          ann('notice', 'qemu-result', json.dumps(res))
-          ann('notice', 'qemu-screen', scr[-4000:] or '(blank)')
-          # The milestones, in the order the kernel reaches them.
-          marks = [
-              ('start.s executed',        'SWEET EARLY'),
-              ('MMU on / arm_init',       'Darwin Kernel Version'),
-              ('pmap_startup done',       'pmap_startup'),
-              ('VM bootstrap done',       'VM bootstrap done'),
-              ('platform expert',         'starting device-tree platform expert'),
-              ('framebuffer up',          'SWEET FB'),
-              ('waiting for root',        'waiting for root device'),
-          ]
-          hit = [n for n, s in marks if s in scr]
-          miss = [n for n, s in marks if s not in scr]
-          ann('notice', 'qemu-milestones', 'reached: ' + (', '.join(hit) or '(none)'))
-          if 'panic' in scr.lower():
-              ann('error', 'qemu-panic', scr[-4000:])
-          elif 'waiting for root device' in scr:
-              ann('notice', 'qemu-verdict', 'PASS: kernel ran to the root-device wait (M2)')
-          elif 'VM bootstrap done' in scr or 'SWEET FB' in scr:
-              ann('notice', 'qemu-verdict', 'kernel reached userspace prep; stopped before M2')
-          else:
-              ann('warning', 'qemu-verdict', 'kernel stopped early: ' + (', '.join(miss) or '?'))
-          PY
-          exit 0
-
       - name: Report artifact inventory as annotations
         # Runs after Collect, and exists because the artifacts themselves need
         # a GitHub login to download: this is the only anonymous proof of what
@@ -289,4 +227,61 @@ jobs:
         with:
           name: xnu-kernel
           path: out/
+          if-no-files-found: warn
+
+  qemu:
+    # Runs on Linux because the harness needs qemu-system-aarch64, which the
+    # macOS build runner does not have. It downloads the kernel the build job
+    # just produced and boots it on QEMU virt with gic-version=2 and a
+    # Cortex-A53: the same ISA and interrupt-controller family ugg has.
+    # That is an automated early-boot proof (start.s -> MMU -> pmap -> bsd_init)
+    # which works without the phone. It cannot check ugg MMIO, eMMC or panel.
+    needs: build
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and LLVM
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm llvm
+          qemu-system-aarch64 --version | head -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xnu-kernel
+          path: kernel
+
+      - name: Boot it
+        run: |
+          set +e
+          ls -la kernel || true
+          KERNEL=$(ls kernel/kernel.development.* 2>/dev/null | grep -v unstripped | head -1)
+          if [ -z "$KERNEL" ]; then echo '::error title=qemu::no kernel artifact'; exit 1; fi
+          echo "kernel: $KERNEL"
+          python3 tools/mkadt_ugg.py qemu.adt --qemu
+          python3 tools/mkpayload.py "$KERNEL" qemu.adt qemu-payload.bin --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -v'
+          mkdir -p qout
+          timeout 300 python3 tools/qemu-ugg.py qemu-payload.bin qout --kernel "$KERNEL" --secs 45 > qout/run.txt 2>&1
+          echo "qemu exit: $?"
+          echo '--- decoded screen ---'
+          head -50 qout/fb.txt 2>/dev/null || echo '(no fb.txt)'
+          echo '--- result ---'
+          cat qout/result.json 2>/dev/null || echo '(no result.json)'
+          echo '--- harness output ---'
+          tail -20 qout/run.txt
+          exit 0
+
+      - name: Report as annotations
+        if: always()
+        run: |
+          python3 .github/qemu_report.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-boot
+          path: qout/
           if-no-files-found: warn

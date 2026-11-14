@@ -652,3 +652,72 @@ sweetfb_noconsole=1 sweetfb_hz=15
 | `sweetfb_hz=15` | mido 实测 30 Hz 会把单核 A53 压满导致 eMMC 超时、触摸延迟数分钟 |
 | `wdt=-1` | 关硬件看门狗，慢启动不能被它杀掉 |
 | 没有 `midogpu=1` | 我们删了 GPU |
+
+---
+
+## 14. ★★★ 根卷不再需要你的 Linux 电脑（2026-11-15 00:45）
+
+### 14.1 我之前的判断是错的，已用实测推翻
+
+之前我写「根卷必须 Linux 电脑，GitHub Actions 编不下」。**这个结论是错的**，原因是我用的是
+「ubuntu runner 只有 14 GB」这个流传的说法，**没有实测**。
+
+新加的 `probe-rootenv.yml` 把六个前提全部实测了一遍，**六个全部通过**：
+
+| # | 前提 | 实测结果 |
+|---|---|---|
+| 1 | 磁盘空间 | **86 GB 可用**（`/dev/root 145G，用了 59G`），不是 14 GB |
+| 2 | `modprobe hfsplus` | **MODPROBE OK**（ubuntu-24.04 上是模块，能加载） |
+| 3 | `mkfs.hfsplus` | **MKFS OK** |
+| 4 | `mount -t hfsplus -o loop,force` | **MOUNT OK** |
+| 5 | `fsck.hfsplus -fy` | **FSCK OK** |
+| 6 | `apfs-fuse` 源码构建 | **cmake rc=0, ninja rc=0**，50/50 目标全部链接完成 |
+
+> 唯一一个 FAILED 是 `touch /mnt/hfstest/hello` 用了普通用户权限（挂载点是 root 所有），
+> 不是文件系统问题 —— 后面用 `sudo touch` 复测是 **HFS+ read-write OK**。
+
+### 14.2 顺带确认了 WSL2 到底差在哪
+
+| 项 | ubuntu-24.04 runner | WSL2 |
+|---|---|---|
+| `CONFIG_HFSPLUS_FS` | 有（模块） | **没有**（mido 踩过的坑） |
+| 能不能 `modprobe` | ✅ | ❌ 没有模块可加载 |
+
+所以「WSL2 不行」是真的，但「Actions 也不行」是我没验证的臆断。
+
+### 14.3 新增 `build-root.yml`（189 行，11 步）
+
+| 步 | 动作 |
+|---|---|
+| 1 | 清掉 runner 上预装的大工具链（dotnet/android/ghc/boost），腾出空间 |
+| 2 | 装工具链 + **验证 hfsplus 能 mount 能写**（不通过就早失败） |
+| 3 | 源码构建 `apfs-fuse` 并 `cmake --install` |
+| 4 | 下载 IPSW（可用 `ipsw` 自动解析，也可手填`ipsw_url`） |
+| 5 | 从 `BuildManifest.plist` **按角色**找 OS / Cryptex1,SystemOS / Cryptex1,AppOS |
+| 6 | `mkiosroot.sh` 合成 16 GiB HFS+ |
+| 7 | 挂载 + `sweet-root-tweaks.py` + 卸载 + fsck |
+| 8 | `img2simg` 转 sparse |
+| 9 | **按 1.8 GB 切片**（GitHub 单个 artifact 文件上限 10 GB） |
+| 10 | 生成 `SHA256SUMS` |
+| 11 | 上传 `ios16-root-parts` artifact |
+
+### 14.4 你要做的变成两步
+
+`
+# 1. 触发根卷构建（免费，约 1-2 小时）
+gh workflow run build-root.yml -R honghong2011/ios-ugg --ref ugg-port
+
+# 2. 下载 + 拼回 + 校验（本机）
+gh run download <RUN_ID> -R honghong2011/ios-ugg -n ios16-root-parts -D parts
+cd parts && sha256sum -c SHA256SUMS
+cat ios16-root.simg.part* > ../ios16-root.simg
+`
+
+### 14.5 诚实标注风险
+
+| 风险 | 说明 |
+|---|---|
+| IPCC 下载 5-6 GB | 从 Apple CDN 下载，runner 网络快，但如果 Apple 改 URL 会失败 → 可用 `ipsw_url` 手填 |
+| 16 GiB HFS+ 合成耗时 | mido 本地 20-60 分钟；runner 磁盘快，预计 30-50 分钟 |
+| 总时长 | 预计 60-90 分钟，workflow 超时设 350 分钟，够 |
+| 免费额度 | public 仓库的 Actions 分钟数免费且不限量 |
