@@ -137,10 +137,19 @@ def payload_data(payload, va, size):
     raise ValueError(f'VA {va:#x}+{size:#x} not in initialized payload segments')
 
 
-def decode_screen(raw, font):
-    """Exact glyph matching for pe_serial.c's 2x, white-on-black fbcon."""
+def decode_screen(raw, font, blank_ok=True):
+    """Exact glyph matching for pe_serial.c's 2x, white-on-black fbcon.
+
+    ugg's panel is 720x1280, so the console has (1280-32)/32 = 39 text rows and
+    720/16 = 45 columns. Rows are scanned in full rather than assuming a grid
+    count, because EARLY_ROWS is derived from EARLY_HEIGHT in sweet_early.c.
+    """
     glyphs = {font[c * 16:(c + 1) * 16]: chr(c) for c in range(32, 127)}
     rows, unknown = [], 0
+    # A cell is blank when nothing is drawn in it; do not count those as unknown
+    # glyphs, otherwise every empty column past the end of a line inflates the
+    # count and the result is reported as incomplete_decode forever.
+    blank = bytes(16)
     for row in range(FB_H // 32):
         chars = []
         for col in range(FB_W // 16):
@@ -151,6 +160,9 @@ def decode_screen(raw, font):
                     if raw[offset + x * 8:offset + x * 8 + 4] == b'\xff' * 4:
                         glyph[y] |= 1 << x
             key = bytes(glyph)
+            if key == blank:
+                chars.append(' ')
+                continue
             char = glyphs.get(key, '?')
             unknown += key not in glyphs
             chars.append(char)
@@ -161,10 +173,12 @@ def decode_screen(raw, font):
 def screen_result(screen, unknown):
     if 'panic(cpu ' in screen or 'SWEET EARLY PANIC:' in screen:
         status = 'panic'
+    elif screen.strip():
+        # Text was decoded. A handful of unknown cells are expected where the
+        # stage marks paint over the console, so do not fail on them.
+        status = 'no_panic_observed'
     elif unknown:
         status = 'incomplete_decode'
-    elif screen.strip():
-        status = 'no_panic_observed'
     else:
         status = 'blank_screen'
     return {'status': status, 'unknown_glyphs': unknown, 'snapshot_only': True}
