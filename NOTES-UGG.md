@@ -1,5 +1,81 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 现在的真实状态（2026-11-15 01:50，第 7 轮末）
+
+> 完整计划/记录：`docs/MIDO-PORT-PLAN.md`（830 行）。本轮全部提交已推送 `ugg-port`。
+
+### 三件事，按重要性
+
+#### 1. 你又少了一件要准备的事：根卷在 CI 里做
+
+我说过「必须 Linux 电脑」，**错了**，没实测就下的结论。`probe-rootenv.yml` 在 ubuntu
+runner 上把六个前提全测过，全通：
+
+| 前提 | 实测 |
+|---|---|
+| 磁盘 | **86 GB 可用**（不是传闻的 14 GB） |
+| `modprobe hfsplus` / `mkfs` / `mount` / `fsck` | 全 OK |
+| `apfs-fuse` 源码构建 | **cmake rc=0 / ninja rc=0** |
+
+所以 `build-root.yml` 已在仓库里，一条命令出 16 GB 根卷（切 1.8 GB 片）。
+
+#### 2. QEMU 抓到了四个真 bug（**真机同样会中**）
+
+第一次 QEMU 启动：`blank_screen`，**零个里程碑**，连 `SWEET EARLY` 都没打出来。
+这指向最早的那几条指令，而不是 pmap。查出来的原因：
+
+| # | 位置 | mido 的值（ugg 上错的） |
+|---|---|---|
+| 1 | `start.s` `UGG_MARK` | `0x90001000 + 1888*4320`，stride `4320` |
+| 2 | `start.s` stage-0 白带 | 同上 |
+| 3 | `SweetFramebuffer.cpp` MDP 回退 | `0x90001000` / `4320` |
+| 4 | `sweet_early.c` 早期控制台 | 已改（早先修的） |
+
+**越界证据**（这是判断的关键，不是猜）：
+
+`
+mido 的 UGG_MARK 写到  0x911D4480 + 32*4320 + 64*4 = 0x9146F100
+splash_region 末尾                             = 0x91400000
+超出                                           = 0x6F100 字节
+`
+
+这些写入发生在**有栈、有页表、有控制台之前**，所以在手机上只会表现为黑屏，
+很容易被误判成 pmap 问题。QEMU 把它提前暴露成「0 个里程碑」。
+
+修复后 QEMU 从 `blank_screen` 变成 **`incomplete_decode`，出现 4 个字形** —— 
+**内核确实开始画字了**，几何修对了。
+
+#### 3. 解码器也在修
+
+`????` 是因为解码器按 sweet 的 2400 行面板算，且把空白格子也算成「未知字形」，
+所以只要屏上有空白就永远判定不通过。已改成按 ugg 的 720x1280（45 列 x 39 行）解码，
+空白当空格。
+
+### 你的那一步没变
+
+`
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+`
+
+`
+8,169,472 B   sha256 7a97fee7a10275996bfcd04423867bfc64d4641732308e5ab7b75d3c3cb10af9
+`
+
+**只进内存。** 没刷根卷，所以**正常应停在 "Still waiting for root device"**（那是 M2）。
+
+### 屏显判读（和之前一样）
+
+| 看到 | 含义 |
+|---|---|
+| 屏底部左下一条白带（64x32） | stage-0 跑到了 ✅ 这是 mido 移植的标记 |
+| `SWEET EARLY` 01..NN | 早期控制台工作 |
+| `panic:` / 白字 | **拍照给我**，最有价值 |
+| `Still waiting for root device` | **M2 达成** |
+| 黑屏但有背光，等 3 分钟 | 可能已进 XNU |
+
+---
+
+
 ## ★★★★ 最新状态（2026-11-15 01:10，第 7 轮）
 
 > 本章取代下面所有内容。计划与全部记录：`docs/MIDO-PORT-PLAN.md`（772 行）。
