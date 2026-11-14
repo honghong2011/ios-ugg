@@ -34,3 +34,5 @@ void mido_con_kv(const char *k, uint64_t v);
 #ifndef C_GREEN
 #define C_GREEN  0x005000
 #endif
+
+/* trigger: 2026-11-14T20:49:35Z */
