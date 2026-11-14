@@ -1,0 +1,189 @@
+name: build-root
+
+# Builds the 16 GiB HFS+ iOS root image on a GitHub runner.
+#
+# This is possible only because a probe (probe-rootenv.yml) verified all six
+# requirements on ubuntu-24.04:
+#   disk 86 GB free | modprobe hfsplus OK | mkfs.hfsplus OK | mount OK |
+#   fsck OK | apfs-fuse builds from source (cmake/ninja rc=0)
+# That is why the user does not need to find a Linux machine.
+#
+# Output: ios16-root.simg (sparse, ~12 GB), uploaded as a workflow artifact.
+# GitHub caps workflow artifacts at 10 GB per file, so the sparse image is
+# shipped in fixed-size parts that the user concatenates before flashing.
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: 'Direct IPSW URL (leave empty to resolve via the ipsw tool)'
+        required: false
+        default: ''
+      device:
+        description: 'iPhone model identifier (ugg presents as iPhone 8)'
+        default: 'iPhone10,4'
+      version:
+        description: 'iOS version'
+        default: '16.7.16'
+      part_mb:
+        description: 'Split size for the sparse image parts (MB)'
+        default: '1800'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up runner disk
+        # The runner has 86 GB free; the job needs ~40. Remove the big
+        # preinstalled toolchains anyway so a 16 GB image plus the IPSW plus
+        # the sparse copy never runs the volume out.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rsync hfsprogs android-sdk-libsparse-utils \
+            llvm cmake ninja-build libfuse3-dev zlib1g-dev libbz2-dev libssl-dev \
+            git unzip python3 curl
+          # hfsplus is a module on ubuntu-24.04 and modprobe works on the runner
+          sudo modprobe hfsplus
+          grep -i hfsplus /proc/modules || echo 'hfsplus not listed in /proc/modules'
+          sudo mkdir -p /mnt/probe
+          dd if=/dev/zero of=/tmp/p.img bs=1M count=32 status=none
+          sudo mkfs.hfsplus -v PROBE /tmp/p.img >/dev/null
+          sudo mount -t hfsplus -o loop,force /tmp/p.img /mnt/probe
+          sudo touch /mnt/probe/x && echo 'HFS+ read-write OK' || echo 'HFS+ WRITE FAILED'
+          sudo umount /mnt/probe
+
+      - name: Build apfs-fuse
+        run: |
+          git clone -q --depth 1 https://github.com/sgan81/apfs-fuse.git /tmp/apfs-fuse
+          cd /tmp/apfs-fuse
+          git submodule update --init --depth 1
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release > /tmp/cmake.log 2>&1
+          cmake --build build > /tmp/ninja.log 2>&1
+          sudo cmake --install build
+          sudo ldconfig
+          command -v apfs-fuse && apfs-fuse --help 2>&1 | head -3 || true
+
+      - name: Fetch the IPSW
+        run: |
+          mkdir -p work/ipsw
+          URL="${{ inputs.ipsw_url }}"
+          if [ -z "$URL" ]; then
+            pip3 install --quiet ipsw
+            URL=$(python3 -m ipsw download ipsw --device "${{ inputs.device }}" \
+                  --version "${{ inputs.version }}" --output work/ipsw --url-only 2>/dev/null | tail -1)
+          fi
+          echo "IPSW URL: $URL"
+          [ -n "$URL" ] || { echo '::error title=ipsw::could not resolve an IPSW URL; pass ipsw_url'; exit 1; }
+          curl -L --retry 3 --retry-delay 5 -o work/ipsw/fw.ipsw "$URL"
+          ls -l work/ipsw/fw.ipsw
+
+      - name: Extract the three system images
+        run: |
+          cd work
+          unzip -q -o ipsw/fw.ipsw -d ipswext
+          python3 - <<'PY'
+          import os, plistlib, sys
+          d = 'ipswext'
+          man = plistlib.load(open(os.path.join(d, 'BuildManifest.plist'), 'rb'))
+          ident = None
+          want = '${{ inputs.device }}'.lower().replace('iphone', '')
+          # map iPhone10,4 -> d20ap, iPhone10,5 -> d211ap
+          devmap = {'10,4': 'd20ap', '10,5': 'd211ap', '10,3': 'd22ap', '10,6': 'd21ap'}
+          code = devmap.get(want, 'd20ap')
+          for i in man['BuildIdentities']:
+              if code in str(i.get('Info', {})).lower():
+                  ident = i
+                  break
+          if ident is None:
+              ident = man['BuildIdentities'][0]
+              print('warning: no %s identity, using the first' % code, file=sys.stderr)
+          roles = {}
+          for k, v in ident.get('Manifest', {}).items():
+              if not isinstance(v, dict):
+                  continue
+              p = v.get('Info', {}).get('Path')
+              if not p:
+                  continue
+              if k == 'OS':
+                  roles['OS'] = p
+              elif k.startswith('Cryptex1,SystemOS'):
+                  roles['SYSTEMOS'] = p
+              elif k.startswith('Cryptex1,AppOS'):
+                  roles['APPOS'] = p
+          missing = [k for k in ('OS', 'SYSTEMOS', 'APPOS') if k not in roles]
+          if missing:
+              sys.exit('missing roles: ' + ', '.join(missing))
+          for k, p in roles.items():
+              print(k, p)
+              open(os.path.join(d, k + '.path'), 'w').write(p)
+          PY
+          for role in OS SYSTEMOS APPOS; do
+            f="ipswext/$(cat ipswext/$role.path)"
+            [ -f "$f" ] || { echo "::error title=missing::$role not found at $f"; exit 1; }
+            ln -sf "$(realpath "$f")" "ipswext/$role.dmg"
+            ls -l "ipswext/$role.dmg"
+          done
+
+      - name: Build the HFS+ root
+        # mkiosroot.sh does the apfs-fuse mounts, the rsync merge and applies
+        # nothing else; sweet-root-tweaks.py then does the bring-up changes.
+        run: |
+          sudo -E ./ugg/tools/mkiosroot.sh \
+            work/ipswext/OS.dmg work/ipswext/SYSTEMOS.dmg work/ipswext/APPOS.dmg \
+            work/ios16-root.img 16G
+          sudo fsck.hfsplus -fy work/ios16-root.img || true
+
+      - name: Apply the bring-up tweaks
+        run: |
+          sudo mkdir -p work/mnt
+          sudo mount -t hfsplus -o loop,force work/ios16-root.img work/mnt
+          sudo python3 ./ugg/tools/sweet-root-tweaks.py work/mnt
+          sync
+          sudo umount work/mnt
+          sudo fsck.hfsplus -fy work/ios16-root.img
+
+      - name: Convert to sparse and split
+        run: |
+          img2simg work/ios16-root.img work/ios16-root.simg
+          ls -l work/ios16-root.img work/ios16-root.simg
+          mkdir -p work/parts
+          split -b ${{ inputs.part_mb }}M work/ios16-root.simg work/parts/ios16-root.simg.part
+          ls -l work/parts | head -20
+          (cd work/parts && sha256sum * > SHA256SUMS)
+          cat work/parts/SHA256SUMS
+
+      - name: Report
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, os, json
+          def ann(kind, title, body):
+              esc = body.replace('%', '%25').replace(chr(13), '').replace(chr(10), '%0A')
+              print('::%s title=%s::%s' % (kind, title, esc[:40000]))
+          img = 'work/ios16-root.img'
+          simg = 'work/ios16-root.simg'
+          lines = []
+          for p in (img, simg):
+              lines.append('%s %d' % (p, os.path.getsize(p)) if os.path.exists(p) else '%s MISSING' % p)
+          parts = sorted(glob.glob('work/parts/*.part*'))
+          lines.append('parts: %d files' % len(parts))
+          ann('notice', 'root-sizes', chr(10).join(lines))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios16-root-parts
+          path: work/parts/
+          retention-days: 5
+          if-no-files-found: warn
