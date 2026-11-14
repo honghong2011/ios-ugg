@@ -74,64 +74,33 @@ jobs:
           command -v apfs-fuse && apfs-fuse --help 2>&1 | head -3 || true
 
       - name: Fetch the IPSW
+        # The URL comes from api.ipsw.me, which lists the exact Apple CDN link
+        # for a device and version. `ipsw download ipsw --url-only` does not
+        # exist (checked the released binary), so do not use that.
+        env:
+          IPFW_URL: ${{ inputs.ipsw_url }}
+          DEVID: ${{ inputs.device }}
+          IOSVER: ${{ inputs.version }}
         run: |
           mkdir -p work/ipsw
-          URL="${{ inputs.ipsw_url }}"
+          URL="$IPFW_URL"
           if [ -z "$URL" ]; then
-            pip3 install --quiet ipsw
-            URL=$(python3 -m ipsw download ipsw --device "${{ inputs.device }}" \
-                  --version "${{ inputs.version }}" --output work/ipsw --url-only 2>/dev/null | tail -1)
+            URL=$(python3 tools/ipsw_url.py "$DEVID" "$IOSVER")
           fi
           echo "IPSW URL: $URL"
-          [ -n "$URL" ] || { echo '::error title=ipsw::could not resolve an IPSW URL; pass ipsw_url'; exit 1; }
+          [ -n "$URL" ] || { echo '::error title=ipsw::cannot resolve a URL'; exit 1; }
           curl -L --retry 3 --retry-delay 5 -o work/ipsw/fw.ipsw "$URL"
           ls -l work/ipsw/fw.ipsw
+          python3 tools/check_ipsw.py work/ipsw/fw.ipsw
 
       - name: Extract the three system images
         run: |
-          cd work
-          unzip -q -o ipsw/fw.ipsw -d ipswext
-          python3 - <<'PY'
-          import os, plistlib, sys
-          d = 'ipswext'
-          man = plistlib.load(open(os.path.join(d, 'BuildManifest.plist'), 'rb'))
-          ident = None
-          want = '${{ inputs.device }}'.lower().replace('iphone', '')
-          # map iPhone10,4 -> d20ap, iPhone10,5 -> d211ap
-          devmap = {'10,4': 'd20ap', '10,5': 'd211ap', '10,3': 'd22ap', '10,6': 'd21ap'}
-          code = devmap.get(want, 'd20ap')
-          for i in man['BuildIdentities']:
-              if code in str(i.get('Info', {})).lower():
-                  ident = i
-                  break
-          if ident is None:
-              ident = man['BuildIdentities'][0]
-              print('warning: no %s identity, using the first' % code, file=sys.stderr)
-          roles = {}
-          for k, v in ident.get('Manifest', {}).items():
-              if not isinstance(v, dict):
-                  continue
-              p = v.get('Info', {}).get('Path')
-              if not p:
-                  continue
-              if k == 'OS':
-                  roles['OS'] = p
-              elif k.startswith('Cryptex1,SystemOS'):
-                  roles['SYSTEMOS'] = p
-              elif k.startswith('Cryptex1,AppOS'):
-                  roles['APPOS'] = p
-          missing = [k for k in ('OS', 'SYSTEMOS', 'APPOS') if k not in roles]
-          if missing:
-              sys.exit('missing roles: ' + ', '.join(missing))
-          for k, p in roles.items():
-              print(k, p)
-              open(os.path.join(d, k + '.path'), 'w').write(p)
-          PY
+          unzip -q -o work/ipsw/fw.ipsw -d work/ipswext
+          python3 tools/ipsw_roles.py work/ipswext "${{ inputs.device }}"
           for role in OS SYSTEMOS APPOS; do
-            f="ipswext/$(cat ipswext/$role.path)"
-            [ -f "$f" ] || { echo "::error title=missing::$role not found at $f"; exit 1; }
-            ln -sf "$(realpath "$f")" "ipswext/$role.dmg"
-            ls -l "ipswext/$role.dmg"
+            f="work/ipswext/$(cat work/ipswext/$role.path)"
+            ln -sf "$(realpath "$f")" "work/ipswext/$role.dmg"
+            ls -l "work/ipswext/$role.dmg"
           done
 
       - name: Build the HFS+ root
