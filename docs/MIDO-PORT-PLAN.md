@@ -1055,3 +1055,60 @@ fastboot -S 256M flash userdata ../ios16-root.simg
 fastboot boot shim-boot-0082-mido.img
 @@@@
 
+
+---
+
+## 21. ★★★★★ 根卷交付完成（第 8 轮，2026-11-15 04:10）
+
+### 21.1 最终产物
+
+| 项 | 值 |
+|---|---|
+| CI run | **43634756880** |
+| artifact | @@@@ios16-root-parts@@@@（5,837,802,844 B，未过期）|
+| 完整 sparse 镜像 | **11,970,598,900 B**（11.15 GiB）|
+| 镜像本体 | 17,179,869,184 B（16 GiB HFS+）|
+| 分片 | **7 个**：6 × 1,887,436,800 + 1 × 645,978,100 |
+| 校验 | 每片 sha256，聚合后与 @@@@ios16-root.simg@@@@ 一致 |
+| fsck | @@@@The volume iOSRoot appears to be OK.@@@@ |
+| 全部步骤 | **11/11 success** |
+
+### 21.2 下载并重组
+
+@@@@
+gh run download 43634756880 -R honghong2011/ios-ugg -n ios16-root-parts -D parts
+cd parts
+sha256sum -c SHA256SUMS          # 7 片全部 OK
+cat ios16-root.simg.part* > ../ios16-root.simg
+ls -l ../ios16-root.simg          # 应为 11970598900 字节
+@@@@
+
+> @@@@cat part*@@@ 依赖字典序，@@@@partaa..partag@@@@ 正好有序，可直接拼。
+> 拼完建议再核对一次总字节数（11970598900）再刷。
+
+### 21.3 刷入（会清空 Android 数据，用户已批准）
+
+@@@@
+fastboot getvar partition-size:userdata     # 记录，用于确认够大
+fastboot -S 256M flash userdata ios16-root.simg
+fastboot boot shim-boot-0082-mido.img
+@@@@
+
+| 参数 | 值 | 依据 |
+|---|---|---|
+| @@@@-S 256M@@@@ | 每包 256 MB | fastboot 上限 511 MiB，取一半最稳 |
+| 预计耗时 | 10-15 分钟 | mido 用 512M 花了 507 秒；ugg 的 eMMC 更慢 |
+| 首启等待 | **4-8 分钟** | mido 实测；ugg CPU 更弱，别以为挂了 |
+
+### 21.4 现在的完整链条
+
+| 环节 | 状态 |
+|---|---|
+| XNU 内核 | ✅ CI 可编（applied=86，28 文件补丁） |
+| shim | ✅ CI 可编（eMMC/RPM/GT9xx/日志环） |
+| boot.img | ✅ 已打包校验（8,169,472 B） |
+| **根卷** | ✅ **CI 可编（11.15 GiB，7 片）** |
+| 上机 | ⏳ 等你一次操作 |
+
+**所有构建依赖 GitHub Actions，不再需要任何本地 Linux 环境。**
+
