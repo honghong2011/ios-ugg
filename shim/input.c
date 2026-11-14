@@ -163,7 +163,15 @@ static int gt_read(uint16_t reg, uint8_t *buf, int n)
 int
 input_setup(void)
 {
-	int e = rpm_ldo_enable(10, 2850000, 40);              /* touch vdd_ana */
+	int e = rpm_ldo_enable(10, 2850000, 40);              /* touch vdd_ana (2.85 V) */
+	/*
+	 * vcc_i2c too. ugg's device tree gives goodix@5d vcc_i2c-supply =
+	 * regulator-l6 (1.8 V), and without it the QUP3 pull-ups have no rail,
+	 * so the bus reads 0xFF no matter what the protocol does.
+	 * The return value is ignored: if the RPM refuses, the driver still
+	 * reports the touch IC id and the failure is visible in the log.
+	 */
+	int e6 = rpm_ldo_enable(6, 1800000, 40);              /* vcc_i2c (1.8 V) */
 	*(volatile uint32_t *)GCC_APCS_CLK_VOTE |= (1u << 10);
 	*(volatile uint32_t *)GCC_QUP3_I2C_CBCR |= 1u;
 	delay_ms(2);
@@ -179,6 +187,8 @@ input_setup(void)
 	uint32_t core = *(volatile uint32_t *)GCC_QUP3_I2C_CBCR;
 	con_puts("INPUT SETUP: RPM L10 E=");
 	con_dec((uint64_t)(int64_t)e);
+	con_puts(" L6 E=");
+	con_dec((uint64_t)(int64_t)e6);
 	con_puts(" CLK ");
 	con_puts(((ahb | core) & (1u << 31)) ? "OFF" : "ON");
 	con_putc('\n');
