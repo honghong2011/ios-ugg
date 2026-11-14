@@ -25,7 +25,9 @@ def main():
     ann('notice', 'qemu-result', json.dumps(res))
     ann('notice', 'qemu-screen', scr[-4000:] or '(blank)')
 
-    # The boot milestones, in the order the kernel reaches them.
+    # Markers. sweet_early_mark() also paints a 48px colour band per stage, which
+    # corrupts the glyphs on the row it lands on, so a decoded '?' on its own is
+    # not proof of anything; the words are.
     marks = [
         ('start.s', 'SWEET EARLY'),
         ('arm_init', 'Darwin Kernel Version'),
@@ -38,6 +40,14 @@ def main():
     hit = [n for n, s in marks if s in scr]
     ann('notice', 'qemu-milestones', 'reached: ' + (', '.join(hit) or '(none)'))
 
+    # Anything that is not a blank line and not only the stage-band residue
+    # means the early console produced text, i.e. start.s ran and sweet_early_putc
+    # reached the framebuffer.
+    body = [ln for ln in scr.splitlines() if ln.strip()]
+    printable = [ln for ln in body if any(c.isalnum() for c in ln)]
+    ann('notice', 'qemu-text', 'non-blank rows: %d, rows with letters/digits: %d'
+        % (len(body), len(printable)))
+
     low = scr.lower()
     if 'panic' in low:
         ann('error', 'qemu-panic', scr[-4000:])
@@ -45,8 +55,12 @@ def main():
         ann('notice', 'qemu-verdict', 'PASS: kernel ran to the root-device wait (M2)')
     elif 'SWEET FB' in scr or 'VM bootstrap done' in scr:
         ann('notice', 'qemu-verdict', 'kernel reached userspace prep, stopped before M2')
+    elif printable:
+        ann('notice', 'qemu-verdict', 'kernel is drawing text on the early console')
+    elif 'SWEET EARLY' in scr:
+        ann('notice', 'qemu-verdict', 'early console reached; text partly unreadable')
     else:
-        ann('warning', 'qemu-verdict', 'kernel stopped early; see qemu-screen')
+        ann('warning', 'qemu-verdict', 'no decodable console output; see qemu-screen')
     return 0
 
 

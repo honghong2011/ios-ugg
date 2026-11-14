@@ -53,7 +53,10 @@ QEMU_GICD, QEMU_GICC = 0x08000000, 0x08010000
 QEMU_TIMEBASE = 62500000
 QEMU_VTIMER_INTID = 27
 QEMU_PHYS_BASE = 0x50000000
-QEMU_MEM_SIZE = 0x20000000
+# Must exceed 1 GiB: arm_init() picks 16 KB VM pages over the 4 KB hardware
+# granule only when memSize > 1 GiB, and that is the configuration the phone
+# runs. A smaller QEMU image would silently test the 4 KB path instead.
+QEMU_MEM_SIZE = 0x60000000     # 1.5 GiB, same as ugg's PHYS_BASE..MEM_SIZE
 
 # MSM8940: two clusters of four Cortex-A53, MPIDR Aff1:Aff0
 CPU_MPIDRS = [0x000, 0x001, 0x002, 0x003, 0x100, 0x101, 0x102, 0x103]

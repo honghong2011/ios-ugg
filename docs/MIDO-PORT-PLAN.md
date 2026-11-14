@@ -828,3 +828,71 @@ splash_region 是 0x90000000 + 0x1400000
 
 > 注：`stride 2880` 不能作为 ARM 的 add 立即数，代码里拆成 `#2048 + #832`，
 > 与 mido 处理 4320 的方式（`#4096 + #224`）同一手法。
+
+---
+
+## 17. ★★★ QEMU 的真结论：不是内核挂了，是我喂了错的内存大小
+
+### 17.1 从 1.16 GB 的 qemu.log 里读出来的事实
+
+`
+Taking exception 3 [Prefetch Abort] on CPU 0    <-- 第一条，根因
+...with ESR 0x21/0x8600000e
+...with FAR 0x5042c5e4
+...with ELR 0x5042c5e4
+
+之后是 4000 条（日志上限）Undefined Instruction：
+Taking exception 1 [Undefined Instruction]
+...with ELR 0xfffffff007426458
+`
+
+`FAR = ELR = 0x5042c5e4` —— 这是一个**物理地址**（phys_base 0x50000000 之后 0x42c5e4）。
+
+换算成 VA：
+
+`
+0x5042c5e4 - 0x50000000 + 0xfffffff007000000 = 0xfffffff00742c5e4
+符号化：common_start + 0x198
+`
+
+**`common_start` 就是 commpage 的起点。** 内核跳到了 commpage 的**物理地址**去执行，
+当然取指失败；随后的 Undefined Instruction 是异常处理器自己的连锁反应。
+
+（补一句：`0x00ad0a04` 不是 LSE，是 `stp` 存对指令。我一开始按 ESR 猜 LSE，扫内核却只找到
+1 处真 LSE，说明猜错了 —— 用 FAR/ELR 换算成符号才对上。）
+
+### 17.2 真正的根因：QEMU 的内存大小让内核走了错误的页大小分支
+
+`arm_init.c` 的选择逻辑：
+
+`
+if (args->memSize > 1 GiB)   PAGE_SHIFT_CONST = PAGE_MAX_SHIFT;   // 16K VM 页
+else                         硬件页粒度                            // 4K
+`
+
+| 环境 | memSize | 走的路径 |
+|---|---|---|
+| **真机 ugg** | 1.5 GiB（0xA0000000..0x100000000） | **16K VM over 4K granule** |
+| **QEMU（我之前设的）** | **512 MiB** | **4K VM** ← 错 |
+
+**所以 QEMU 之前测的根本不是真机的那条路径。** 4K VM 下 commpage 的
+`PAGE_RATIO = 1`，mido 的 `text_leaf_index &= ~(PAGE_RATIO - 1)` 变成空操作，
+commpage 的地址计算与 PTE 布局对不上，于是跳到了物理地址。
+
+### 17.3 修正
+
+`
+QEMU_MEM_SIZE  0x20000000 (512 MiB)  ->  0x60000000 (1.5 GiB)
+`
+
+和真机的 `PHYS_BASE=0xA0000000 / MEM_SIZE=0x60000000` 完全一致，
+这样 QEMU 才真的在测手机跑的那条路径。
+
+### 17.4 这轮的教训（值得写下来）
+
+1. **QEMU 的价值不是「能启动」，而是「用和真机一样的参数启动」。** 内存大小差一个字，
+   走的页大小分支就完全不同，测出来的结论毫无意义。
+2. **不要用 ESR 猜指令类别。** `0x1fe00000` 看着像 LSE，实际是异常处理器在
+   「prefetch abort 之后」自己崩掉的表现。正确做法：用 FAR/ELR 换算成符号。
+3. **1.16 GB 的日志是线索不是噪音。** 4000 条重复异常说明陷入了异常风暴，
+   而风暴的**第一条**（Prefetch Abort，只出现 1 次）才是根因。
