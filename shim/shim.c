@@ -443,7 +443,7 @@ void shim_main(uint64_t dtb)
 	 * (UGG_FB_STRIDE is 720*4). Without the switch every scanline is read at
 	 * the wrong stride and the screen is diagonal garbage.
 	 */
-	shim_fb_to_32bpp();
+	int fb32 = shim_fb_to_32bpp();
 	
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
@@ -479,6 +479,24 @@ void shim_main(uint64_t dtb)
 	perf_boost();
 	con_skip();
 
+	/*
+	 * Refuse to boot XNU on a framebuffer we could not switch to 32 bpp.
+	 * mido gates its jump the same way ("XNU needs the 32 bpp framebuffer;
+	 * never boot it on LK's 24 bpp"). If the pipe is in an unknown state the
+	 * kernel would render into a 24 bpp scan-out: the screen becomes
+	 * unreadable and there is no way to tell a display fault from a kernel
+	 * fault. Stopping here keeps the shim's own output readable, which is
+	 * the whole reason for flashing a small image first.
+	 */
+	if (fb32 != 0) {
+		con_str("FB32", "FAILED: not booting XNU (see MDP line above)");
+		con_skip();
+		con_str("HOLD", "POWER to reboot");
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
+	
 	stage = "loader";
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);

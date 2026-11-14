@@ -55,7 +55,7 @@ shim_delay_ms(unsigned ms)
 static inline uint32_t md_rd(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline void md_wr(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 
-void
+int
 shim_fb_to_32bpp(void)
 {
 	uint32_t addr = md_rd(MDP_RGB0 + 0x14);
@@ -79,7 +79,7 @@ shim_fb_to_32bpp(void)
 		 */
 		con_puts(fmt == FMT_32BPP ? "MDP: already 32bpp\n"
 		                          : "MDP: unexpected FMT, pipe untouched (screen may be unreadable)\n");
-		return;
+		return fmt == FMT_32BPP ? 0 : -1;
 	}
 	/*
 	 * Clear the whole 32 bpp frame first so the switch does not show whatever
@@ -101,4 +101,5 @@ shim_fb_to_32bpp(void)
 	con_puts(" STRIDE=");
 	con_hex(md_rd(MDP_RGB0 + 0x24), 8);
 	con_puts(" (32 bpp)\n");
+	return 0;
 }
