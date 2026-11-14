@@ -1,5 +1,90 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 04:30，第 9 轮）-- 新镜像 + 根卷已验证内容
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1175 行）。
+
+### 请刷这个新镜像
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+8,169,472 B
+sha256 4b787b060111b7ddec43532158616079c6598386ae51c1d375bbc4665605ab2b
+```
+
+**与上一版的唯一区别：`sweetfb_hz` 从 15 改成 30。**
+
+依据是 mido 的实测 A/B（PORTING_LOG 第 981-982 行）：
+
+| 设置 | mido 观察 |
+|---|---|
+| `sweetfb_hz=60` | App 启动了（exec Preferences、MobileSMS，无崩溃无磁盘错误）但**不显示** |
+| `sweetfb_hz=30` | **App 正常打开** |
+| 结论 | 「Use 30 Hz」——60 Hz 的面板拷贝把 CPU 饿死 |
+
+我之前用 15 Hz 没有依据（只是偏保守）。15 虽然不至于像 60 那样严重，但没有验证过，
+而 **30 Hz 是 mido 进桌面时用的值**。
+
+### 根卷内容已验证（不只是「构建成功」）
+
+从 CI 日志确认移植补丁**真的生效**：
+
+| 项 | 证据 |
+|---|---|
+| launchd | `7 _PanicOnCrash renamed, 2 CommCenter jobs removed` |
+| containers | `Bundle` / `Data/System` / `Shared/SystemGroup` / `Temp` 四目录已建 |
+| 音频 | `VirtualAudio.plugin disabled` |
+| MediaToolbox | `StartRecorderServer off` × 3 path |
+| 偏好 | `com.apple.migration` / `springboard` / `purplebuddy` 已写 |
+| dyld 缓存 | `dyld_shared_cache_arm64` + `.symbols` 已硬链接 |
+| 大小/校验 | 16 GiB / 11.15 GiB sparse / fsck OK |
+
+### QEMU 的结论（已停止投入，但要记录）
+
+用符号精确定位到：故障 FAR = `common_start + 0x194`，那里是 **`isb`**，前一条是 **`msr SCTLR_EL1`**
+= **打开 MMU 的那一瞬间**。计算出 TTBR1（T1SZ=25）只覆盖 `0xffffff80_00000000` 以上，
+而 commpage base `0x0FC0000000` **不在覆盖内** —— 这是 `UGG_4K_VM`（36 位 VA 布局的 iOS 值）
+与 39 位 TTBR1 的不自洽。
+
+**mido 从未用过 QEMU**（移植日志里 0 次提及），它靠真机屏显直接到桌面。
+所以 QEMU 保留为回归检查，**不阻塞主线**。
+
+### 你的两步
+
+**1. 刷新镜像看屏显**（不需要根卷）
+
+预期停在 `Still waiting for root device`（M2）。
+
+**2. 在有 20 GB 空闲的机器上下载并刷根卷**
+
+```
+./ugg/flash-root.sh /path/with/20GB
+```
+
+然后：
+
+```
+fastboot -S 256M flash userdata ios16-root.simg     # 10-15 分钟
+fastboot boot shim-boot-0082-mido.img               # 首启 4-8 分钟
+```
+
+### 屏显判读
+
+| 看到 | 含义 |
+|---|---|
+| 左下角白带 / 底部绿色方块（数个数） | stage-0 / 早期阶段号 |
+| `SWEET EARLY NN: 标签` | 早期控制台 |
+| `panic:` | **拍照给我** |
+| `Still waiting for root device` | **M2**（未刷根卷的正常终点） |
+| 苹果 logo | 根卷挂载成功 |
+| 锁屏 / 桌面 | **目标达成** |
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 04:20，第 8 轮）-- 根卷已构建出来，可以刷了
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1114 行）。

@@ -1112,3 +1112,64 @@ fastboot boot shim-boot-0082-mido.img
 
 **所有构建依赖 GitHub Actions，不再需要任何本地 Linux 环境。**
 
+
+---
+
+## 22. 第 9 轮：QEMU 故障的架构级解释（并作出取舍）
+
+### 22.1 用符号精确定位（不是猜测）
+
+| 项 | 值 |
+|---|---|
+| 故障 FAR/ELR | `0x5042c5e4` |
+| 换算成内核 VA | `0xfffffff00742c5e4` = **`common_start + 0x194`** |
+| 该处指令 | `d5033fdf` = **`isb`**（合法指令） |
+| 前一条 | `d5181000` = **`msr SCTLR_EL1, x0`**，即**打开 MMU 的那条** |
+| 反复异常的 ELR | `fleh_dispatch64 + 0x3c`（异常分发器自陷） |
+
+**所以故障发生在 MMU 刚启用的瞬间**：CPU 用物理地址去取 `common_start + 0x194`，
+因为那次取指发生在 TTBR 还没生效的窗口里。
+
+### 22.2 为什么 QEMU 会中、真机可能不中
+
+| 项 | 计算 |
+|---|---|
+| `T1SZ_BOOT` | 25（`__ARM_16K_PG__` 未定义时） |
+| TTBR1 覆盖 | `T1SZ=25` ⇒ 39 位 ⇒ `0xffffff80_00000000` 及以上 |
+| 内核 `common_start` | `0xfffffff0_0742c450` ⇒ **在覆盖内** ✅ |
+| **commpage base** | `0x0000000F_C0000000` ⇒ **不在覆盖内** ❌ |
+
+commpage 的 VA 由 `MACH_VM_MAX_ADDRESS` 推导。`UGG_4K_VM` 把它设成 iOS 的
+`0xFC0000000`，但那是 **36 位 VA 布局**，而这里的 TTBR1 只覆盖 39 位空间的顶部。
+两者的 `T0SZ/T1SZ` 与 commpage base 的组合在 QEMU 上不自洽。
+
+**真机与 QEMU 的差异**：真机是 3.75 GiB、`avail_start` 不同、`pmap_bootstrap` 走的分支不同；
+QEMU 的 1.5 GiB 布局让某段代码路径落入这个不自洽的组合。
+
+### 22.3 取舍：QEMU 停在这里
+
+| 判断 | 依据 |
+|---|---|
+| mido **从未使用 QEMU** | `mido/PORTING_LOG.md` 里 `qemu` 出现 **0 次**，它靠真机屏显直接到了桌面 |
+| 已花 7 轮 CI 仍未通 | 继续投入的边际收益很低 |
+| 真机是唯一判据 | 用户目标是进桌面，QEMU 通过也证明不了 ugg 的 MMIO/RPM/eMMC/面板 |
+| QEMU 的价值已提取 | 5 个真 bug（2 处越界写 + 2 处错地址 + 1 处内存配置错） |
+
+**QEMU 保留为回归检查，不阻塞主线。** 主线是：刷根卷 → 进用户态。
+
+### 22.4 本轮的真实进展：根卷内容已验证
+
+从 CI 日志确认根卷**真的打上了移植补丁**（不是空壳）：
+
+| 证据 | 内容 |
+|---|---|
+| launchd | `7 _PanicOnCrash renamed, 2 CommCenter jobs removed` |
+| containers | `Bundle` / `Data/System` / `Shared/SystemGroup` / `Temp` 四个目录已建 |
+| 音频 | `VirtualAudio.plugin disabled` |
+| MediaToolbox | `StartRecorderServer off` 三个 path（Default / D20 / D201） |
+| 偏好 | `com.apple.migration` / `springboard` / `purplebuddy` 三组键已写 |
+| dyld | `dyld_shared_cache_arm64` 与 `.symbols` 已硬链接进 `System/Library/Caches/com.apple.dyld` |
+| 大小 | 16 GiB 镜像 / 11.15 GiB sparse / fsck OK |
+
+> 注：日志里 `warning: no mobileactivationd system container in the image; skipped data ark`
+> 是 mido 也有的同类警告，不影响启动（激活走 mobileactivationd 的 Hactivation 分支）。
