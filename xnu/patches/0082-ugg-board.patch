@@ -1938,7 +1938,7 @@ index da0bbba..48c4285 100644
  
  	mov		x0, #-1			// Failed
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 00568d3..2c11ae5 100644
+index 00568d3..228adae 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -10892,6 +10892,9 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
@@ -1962,9 +1962,9 @@ index 00568d3..2c11ae5 100644
 +	 * or a no-op, and text_va vs text_pa is what the QEMU boot faulted on (it
 +	 * jumped to text_pa as if it were a VA).
 +	 */
-+	printf("UGG PMAP: commpage vaddr %#llx paddr %#llx leaf %d shift %u ratio %u nptes %d\n",
++	printf("UGG PMAP: commpage vaddr %#llx paddr %#llx shift %u ratio %u nptes %d\n",
 +	    (unsigned long long)commpage_text_va, (unsigned long long)text_pa,
-+	    text_leaf_index, (unsigned)PAGE_SHIFT, (unsigned)PAGE_RATIO, (int)num_ptes);
++	    (unsigned)PAGE_SHIFT, (unsigned)PAGE_RATIO, (int)num_ptes);
 +	#endif
 +
  	pmap_update_tt3e(commpage_pmap_default, commpage_text_va, PMAP_COMM_PAGE_TEXT_PTE_TEMPLATE);
