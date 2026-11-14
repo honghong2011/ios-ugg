@@ -1371,3 +1371,62 @@ HOLD    POWER to reboot
 
 XNU 侧的 eMMC 失败路径本身是对的：`ugg_take_over()` 失败会 `printf` 并返回 `ENXIO`，
 上层转成「等待根设备」重试。所以只要 shim 把卡初始化好，真失败也能在持久日志里看到原因。
+
+---
+
+## 26. 第 13 轮：参数对齐 + 内核门禁复核
+
+### 26.1 又一处照抄 mido 的修正
+
+mido 的日志（PORTING_LOG 574-576）：
+
+> XNU boot #15（`sweetfb_noconsole=1 mido_mute=1`）：用户只看到早期文字 10 分钟。
+> **`-enable_kprintf_spam` 的行在 mute 之后仍然绘制，所以去掉这个启动参数。**
+
+而它进苹果 logo 的那次（boot #16 / run #22）配置是 `sweetfb_noconsole=1 mido_mute=1`，
+**没有 `-enable_kprintf_spam`**。
+
+我的 cmdline 一直带着它。已去掉。
+
+### 26.2 启动参数逐项对比（现在）
+
+| 参数 | mido | ugg | 说明 |
+|---|---|---|---|
+| `debug=0xc` `serial=3` `keepsyms=1` | ✓ | ✓ | 一致 |
+| `rd=ufsroot0` `ufsrw=1` `rootrw=1` | ✓ | ✓ | 一致 |
+| `unentitled_ios_sim_launch=1` `ignition_level=1` | ✓ | ✓ | 一致 |
+| `wdt=-1` `wdt_test=no_user_checkin` | ✓ | ✓ | 一致 |
+| `launchd_unsecure_cache=1` | ✓ | ✓ | 一致 |
+| `sweetfb_noconsole=1` | ✓ | ✓ | 一致 |
+| `sweetfb_hz` | 30 | **30** | 一致（mido A/B 结论） |
+| `-noprogress` | ✓ | ✓ | 一致 |
+| `-enable_kprintf_spam` | ✗（后期去掉） | **✗** | 一致 |
+| `-v` | ✗ | **✓** | **有意保留**：现在需要看内核打印诊断 |
+| `cpus` | 6 | **1** | **有意保留**：LSE 模拟器非多核原子；mido 在 cpus=1 也到过锁屏 |
+
+### 26.3 内核门禁复核（实测，非推断）
+
+对 `ci-xnu18/kernel.development.sweet`（17,140,032 B，sha256 `66df3bc0…`）逐项检查：
+
+| 检查 | 结果 |
+|---|---|
+| `UGG LSE` 字符串 | **FOUND** |
+| `emulating` 字符串 | **FOUND** |
+| `LDADD` 字符串 | **FOUND** |
+| `handle_uncategorized` 符号 | **FOUND** |
+| `sleh_synchronous` 符号 | **FOUND** |
+| `arm_fast_fault` 符号 | **FOUND** |
+| `__TEXT_EXEC` 里的真 LSE 指令 | **0 条** |
+
+唯一被扫出的一条在 `K256 + 0xe4`（`0xfffffff007b1fd74`，word `0x78a5636f`），
+是 **SHA-256 常量表**（数据段里的字面量恰好命中 LSE 掩码），
+与 mido 的 `kscan.py` 记录的同一个假阳性。
+
+**结论：EL0 LSE 模拟器完整可用，内核代码无真 LSE。**
+
+### 26.4 顺带确认
+
+`sweet_ufs.c` 的持久日志环设计正确：
+`sweet_log_start()` 在**分区找到之后、input 初始化之前**调用，
+环形缓冲在 RAM（`sweet_log_ring`），定期刷到分区末尾 4100 KiB。
+所以即使 GUI 起不来，日志也能通过 recovery 拉出来。

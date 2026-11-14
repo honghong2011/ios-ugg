@@ -1,5 +1,85 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 05:20，第 13 轮完）-- 刷这个镜像
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1432 行）。
+
+### 镜像
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+8,169,472 B
+sha256 3fa935772411dadfdda6d14ac1fbcd0126fa6e252bcb9be1b5550ee119f453a4
+```
+
+### 这版改了什么
+
+**去掉 `-enable_kprintf_spam`。** mido 的日志（PORTING_LOG 574-576）明确写：
+
+> 「`-enable_kprintf_spam` 的行在 mute 之后仍然绘制，所以去掉这个启动参数」
+
+去掉之后它才进了苹果 logo 和锁屏。我的 cmdline 一直带着这个参数。
+
+### 启动参数现在与 mido 对齐
+
+| 参数 | mido | ugg |
+|---|---|---|
+| `sweetfb_hz` | 30 | **30** ✓ |
+| `-enable_kprintf_spam` | 无 | **无** ✓ |
+| 其余 13 项 | — | 全部一致 ✓ |
+| `-v` | 无 | **有**（有意：现在需要看打印） |
+| `cpus` | 6 | **1**（有意：LSE 模拟器非多核原子） |
+
+### 内核门禁复核通过（实测）
+
+对内核二进制逐项检查：
+
+| 检查 | 结果 |
+|---|---|
+| `UGG LSE` / `emulating` / `LDADD` 字符串 | 全部 FOUND |
+| `handle_uncategorized` / `sleh_synchronous` / `arm_fast_fault` | 全部 FOUND |
+| `__TEXT_EXEC` 里的真 LSE 指令 | **0 条** |
+
+唯一被扫出的一条在 `K256 + 0xe4`（`0x78a5636f`）—— 那是 **SHA-256 常量表**，
+数据里的字面量恰好命中 LSE 掩码，与 mido 的 `kscan.py` 记录同一个假阳性。
+
+**⇒ EL0 LSE 模拟器完整可用，内核代码无真 LSE。**
+
+### 屏显预期
+
+```
+SHIM    ugg loader + board probe
+MDP RGB0: ADDR=90000000 FMT=0002243f STRIDE=00000870
+MDP RGB0 -> FMT=000236ff STRIDE=00000b40 (32 bpp)
+EMMC HC_MODE=00000001
+ BUS POWER ON: PWRREQ=..
+LBA0 E=0 SIG=AA55 OK
+LBA1 E=0 GPT OK
+#25 F=... N=... cache          <- 你的真实分区表
+LOG TO CACHE ENABLED / LOG VERIFY OK
+INPUT SETUP: RPM L10 E=0 L6 E=0 CLK ON
+LOADER  <原因>
+```
+
+| 看到 | 含义 |
+|---|---|
+| `FB32 FAILED: not booting XNU` | 管道状态异常，已拒绝启动 → **拍照** |
+| `EMMC INIT FAILED` / `BUS POWER STILL OFF` | eMMC 没起来 → **拍照** |
+| `LBA1 ... GPT OK` + 分区列表 | **eMMC 通了** ✅ |
+| `Still waiting for root device` | 没根卷（预期，M2） |
+| `panic:` / 苹果 logo / 锁屏 | 拍照 / 等 / **目标达成** |
+
+### 根卷（不变）
+
+artifact `ios16-root-parts`（run 43634756880），11,970,598,900 B，7 片，**有效期到 11/19**。
+需 20 GB 空闲盘：`./ugg/flash-root.sh /path/with/20GB`
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 05:10，第 12 轮完）-- 刷这个镜像
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1373 行）。

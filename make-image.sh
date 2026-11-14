@@ -41,11 +41,15 @@ python $HERE2/tools/mkadt_ugg.py $ROOT/build/img/ugg.adt
 #    emulator has a stop-the-world (mido's note: the emulator is not atomic
 #    against other cores).
 CMDLINE="debug=0xc serial=3 cpus=1 keepsyms=1 -v"
-CMDLINE="$CMDLINE -enable_kprintf_spam -noprogress"
+# No -enable_kprintf_spam: mido found that its lines keep drawing over the
+# GUI after the mute, so they dropped it before reaching the home screen.
+CMDLINE="$CMDLINE -noprogress"
 CMDLINE="$CMDLINE rd=ufsroot0 ufsrw=1 rootrw=1"
 CMDLINE="$CMDLINE unentitled_ios_sim_launch=1 ignition_level=1"
 CMDLINE="$CMDLINE wdt_test=no_user_checkin wdt=-1 launchd_unsecure_cache=1"
-CMDLINE="$CMDLINE sweetfb_noconsole=1 sweetfb_hz=15"
+# 30 Hz, not 60: mido A/B-tested it -- at 60 apps start but never appear,
+# at 30 they open (the panel copy starves the CPU). See PORTING_LOG 981.
+CMDLINE="$CMDLINE sweetfb_noconsole=1 sweetfb_hz=30"
 echo "=== payload"
 python $HERE2/tools/mkpayload.py "$KERNEL" $ROOT/build/img/ugg.adt \
     $ROOT/build/img/payload.bin --cmdline "$CMDLINE"
