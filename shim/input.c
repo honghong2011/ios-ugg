@@ -148,7 +148,7 @@ static int gt_read(uint16_t reg, uint8_t *buf, int n)
 		(uint16_t)(reg >> 8),
 		(uint16_t)(T_STOP | (reg & 0xff)),
 	};
-	int e = qup_xfer(w, 3, NULL, 0);
+	int e = qup_xfer(w, 3, 0, 0);
 	if (e) {
 		return e;
 	}
@@ -291,7 +291,7 @@ input_test(unsigned seconds)
 					(uint16_t)(GT_REG_STATUS >> 8),
 					(uint16_t)(T_STOP | (GT_REG_STATUS & 0xff)),
 				};
-				qup_xfer(w, 3, NULL, 0);
+				qup_xfer(w, 3, 0, 0);
 			}
 		}
 		delay_ms(100);
