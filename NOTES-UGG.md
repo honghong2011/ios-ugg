@@ -113,6 +113,55 @@
 - 左下角应出现 `stkXXXX`（剩余栈 ÷18 的十六进制）：`stk0e29` = 65,264 B 剩；
 - 若仍有故障 → 这次是**真**故障，`pc/lr/sp/esr/far` 齐全且只报一条。
 
+## 交付物：0097（当前最新，ptov 诊断版，2026-11-14 晚）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `build-m1/diag2/shim-boot-0097-ptovdiag.img` |
+| 大小 | 8,151,040 B |
+| sha256 | `dad085438047a43e1cbe6408a82b742a6ce05ca7d17e1bff85be67cd3bd901b1` |
+| 内核 | `ci-xnu16/kernel.development.ugg`，17,694,912 B，sha256 `285b81e9...765362e8` |
+| 来源 CI | run `43581971337`（`7a410cc`）**success**，`applied=101 skipped=4` |
+| 构造脚本 | `build-m1/mk0098.py` |
+
+**用法（RAM-only，不刷任何分区）**：
+
+`
+fastboot boot build-m1/diag2/shim-boot-0097-ptovdiag.img
+`
+
+**已验证诊断确实进了内核**（吸取 0093/0095 的教训）：
+
+| gate | 结果 |
+|---|---|
+| `ptovn/w.pa/w.va/w.len/w.end/raend` 字符串 | **全部存在**（0x7a101 附近） |
+| `zerva/zerolastva/physmapbase/physmapend` | 仍在（0x78756 附近） |
+| `patches-skipped` | **不含 0097** |
+| `patch-report` | `applied=101`（上一轮 99） |
+
+### 屏幕布局
+
+| 行 | 内容 |
+|---|---|
+| 28~37 | **0097 十个诊断值**（见下） |
+| 38 | `stk` 栈仪表 |
+| 0~27 | 滚动控制台（panic dump 在这里，不会覆盖诊断） |
+
+### 十个值的含义
+
+| 槽 | 标签 | 含义 |
+|---|---|---|
+| 0 | `ptovn` | 非空 ptov 窗口数量 |
+| 1 | `w.pa` | 含 `avail_start` 的窗口起始 PA；**`ffffffffffffffff` = 不在任何窗口** |
+| 2 | `w.va` | 该窗口 VA 基址 |
+| 3 | `w.len` | 该窗口长度 |
+| 4 | `w.end` | 该窗口 PA 结束 |
+| 5 | `zerva` | `phystokv(avail_start)` 应解析到的 VA |
+| 6 | `pstart` | `avail_start`（物理） |
+| 7 | `pb` | `physmap_base` |
+| 8 | `pe` | `physmap_end` |
+| 9 | `raend` | `real_avail_end` |
+
 ## 交付物：0095（当前最新，256 KiB 启动栈，2026-11-14）
 
 | 项 | 值 |
