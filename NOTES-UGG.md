@@ -1,5 +1,74 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★ 路线已切换：照抄 ios-mido（2026-11-14 深夜）
+
+> **本章取代下面所有旧内容。** 旧的 `0082-0098` 自研补丁路线**已全部作废并归档**。
+> 完整计划与执行记录见 **`docs/MIDO-PORT-PLAN.md`**（441 行，最新、必读）。
+
+### 一句话现状
+
+**XNU 补丁 `0082-ugg-board.patch` 已生成并验证零冲突；shim 已移植并 CI 编译通过；正在等最后一轮 xnu CI。**
+
+### 已经做完的（有提交、有 CI、有验证）
+
+| # | 事情 | 证据 |
+|---|---|---|
+| 1 | 发现旧路病根：`ugg/xnu/patches` 里 41 个 `0001-0081` 被改成 `SWEET_FAMILY` 版本，导致 `patch` 只应用一部分 → 假 hunk → 0093/0095/0098 被 CI 跳过 | `same=84 diff=0` 对比上游 |
+| 2 | 恢复上游原版 `0001-0081`（逐字节） | 84 个补丁全部一致 |
+| 3 | 重建干净基线：reset + 3 个 staging 脚本 + apply `0001-0081` | `applied=81 failed=0`，commit `2bbcef0` |
+| 4 | 验证 mido `0100-mido-board.patch` 可在本基线零冲突应用 | 31 文件 `git apply --check` 全过 |
+| 5 | 生成 `0082-ugg-board.patch` | 28 文件 +2089/-22，`git apply --cached --check` 通过 |
+| 6 | 移植 shim（sdhc/rpm/spmi/perf/input + 新写 emmc.c/兼容层/日志环） | shim-ugg CI **success** run 43612347343 |
+| 7 | 生成 UGG ADT（`tools/mkadt_ugg.py`，iPhone10,4/D20AP 750x1334） | 9896 B |
+| 8 | 交付根卷构建脚本 `build-root.sh`（Linux 用，174 行） | `bash -n` 通过 |
+
+### UGG 真实硬件（已从本机 DTB 核实，推翻旧文档）
+
+`
+SoC        MSM8940（骁龙 435），**不是 8937**
+           DTB: model = "Qualcomm Technologies, Inc. MSM8940-PMI8937 MTP"
+eMMC       sdhci@7824900，HC 0x500 / core 0x800，IRQ SPI 123/138
+           电源 L5=1.8V(vdd-io) L8=2.9V(vdd)  <- 与 mido 完全一致
+GCC SDCC1  RCG 0x01842004                        <- 与 mido 完全一致
+触控       goodix@5d on i2c@78b7000 (QUP **v1**)
+           irq gpio65, reset gpio64, power_ldo gpio47
+           vdd_ana = L10 2.85V, vcc_i2c = L6 1.8V  <- 与 mido 完全一致
+面板       720x1280，splash 0x90000000 + 20 MiB
+指纹       fpc1020 + goodix_fp（两个节点都在）
+`
+
+### 与 mido 的差异（全部已处理，见 MIDO-PORT-PLAN §6.3）
+
+| 项 | mido | ugg |
+|---|---|---|
+| framebuffer | 0x90001000 / 1080x1920 / stride 4320 | **0x90000000 / 720x1280 / stride 2880**（2 个 2MB 块） |
+| 呈现画布 | 1242x2208 / 458ppi（iPhone 8 Plus） | **750x1334 / 326ppi（iPhone 8）** |
+| 触控 IC | FocalTech FT5435（8 位寄存器） | **Goodix GT9xx（16 位寄存器）** |
+| GPU | 有（Adreno 506） | **删除**（用户明确跳过） |
+| CPU 升频 | 1401–2016 MHz 五档 | **关闭**（435 档位未实测，风险不可恢复） |
+
+### 下一步（严格按序）
+
+`
+1. 等 xnu CI（run 43612214819 之后的那个）-> 检查三件套：
+   a. annotation 里 applied 计数 = 86（0082 已算在内）
+   b. patches-skipped 里**不含** 0082
+   c. kernel.development.ugg 比上版大（0082 加了 ~2000 行）
+2. 下载内核 -> ./ugg/make-image.sh <kernel>  -> 出 shim-boot-ugg.img
+3. fastboot boot shim-boot-ugg.img（**不刷任何分区**）
+   屏显判读：出 "SWEET FB" = XNU 起来；"Still waiting for root device" = M2 达成
+4. 用户找 Linux 电脑跑 ./ugg/build-root.sh，回传三个数：
+   fsck 输出 / img+simg 字节数 / fastboot getvar partition-size:userdata
+5. 刷 userdata（**这一步会清空 Android 数据，用户已批准**）-> 再 boot -> 目标桌面
+`
+
+### 归档位置
+
+旧 `0082-0098` 补丁在 `build-m1/old-ugg-patches/`（14 个文件），不再使用。
+
+---
+
+
 > 本文件镜像上游 NOTES.md 的 handoff 规范：每次里程碑后更新最新 handoff，区分事实与猜测。
 
 ## ★ 先读这个：iOS 桌面目标的可行性核对（2026-11-14）
