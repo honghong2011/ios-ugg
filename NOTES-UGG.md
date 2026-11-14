@@ -1,5 +1,86 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 05:40，第 15 轮）-- 关键结论：QEMU 到 M2，eMMC 必须真机验
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1582 行）。
+
+### QEMU 已经跑通到 M2（上一轮），这轮搞清了它证明了什么
+
+**已证明**（38 行屏幕完整解码）：
+
+```
+bsd_init: calling loopattach → ether_family_init → net_init_run
+        → inittodr → setconf
+Waiting on <dict ... IOMedia ... Apple_HFS>
+```
+
+| 已证明 |
+|---|
+| start.s → MMU → pmap → VM bootstrap 全通 |
+| IOKit / platform expert |
+| `bsd_init` 全部子系统（kauth/MAC/buffer/socket/domain/skywalk/net） |
+| **旧路线卡死点 A1 不存在了** —— 16K VM over 4K granule 有效 |
+
+**没证明**（必须真机）：
+
+| 项 | 为什么 |
+|---|---|
+| eMMC 驱动 | QEMU 没有 eMMC 硬件，`SWEET UFS` 行根本不出现 |
+| GT9xx 触摸 | 同上 |
+| RPM 电源 | 同上 |
+
+### 一个修正了的判读预期（重要）
+
+`iokit/bsddev/IOKitBSDInit.cpp:778`：
+
+```c
+int ufs_error = sweet_ufs_rootdev(root);
+if (ufs_error) {
+    panic("IOFindBSDRoot: SWEET UFS root %s unavailable: %d", rdBootVar, ufs_error);
+}
+```
+
+**eMMC 驱动失败 = 直接 panic，不是「等待根设备」。**
+
+| 真机现象 | 含义 | 下一步 |
+|---|---|---|
+| `panic: IOFindBSDRoot: SWEET UFS root ufsroot0 unavailable: N` | eMMC 驱动失败（N=errno） | 把 N 告诉我 |
+| `Still waiting for root device` | eMMC OK 但**没刷根卷** | 去刷根卷 |
+| 苹果 logo → 锁屏 | 成功 | 恭喜 |
+
+**好消息**：`serial_console.c:286` 的 `if (sweet_console_muted && !panic_active())` 意味着
+**panic 时一定会重新绘制到屏幕**，即使 `sweetfb_noconsole=1`。两种结局都能看到。
+
+### CI 门禁升级
+
+QEMU 检查从「能画字就算过」升级为：
+
+- 统计 6 个 `bsd_init` 阶段
+- 识别 QEMU 特有的是 `Waiting on ... IOMedia ... Apple_HFS`（这是它在这块板上的最好结果）
+- 明确输出 `PASS: bsd_init complete ... (M2)` 或 `FAIL: kernel panicked`
+
+已用真实屏幕文本回放验证：`of 6 stages: 4 reached` + `PASS ... (M2)`。
+以后任何改动让 pmap/IOKit/bsd_init 退化，都会立刻可见。
+
+### 镜像（不变）
+
+```
+shim-boot-0082-mido.img  8,169,472 B
+sha256 3fa935772411dadfdda6d14ac1fbcd0126fa6e252bcb9be1b5550ee119f453a4
+```
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+### 根卷（不变，已就绪）
+
+artifact `ios16-root-parts`（run 43634756880），11,970,598,900 B，7 片，**有效期到 11/19**。
+需 20 GB 空闲盘：`./ugg/flash-root.sh /path/with/20GB`
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 05:30，第 14 轮）-- QEMU 跑通到 M2，真机应同样
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1505 行）。
