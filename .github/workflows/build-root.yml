@@ -12,6 +12,13 @@ name: build-root
 # GitHub caps workflow artifacts at 10 GB per file, so the sparse image is
 # shipped in fixed-size parts that the user concatenates before flashing.
 on:
+  # workflow_dispatch needs the file on the DEFAULT branch; this workflow
+  # lives on ugg-port, so a push trigger is what actually starts it.
+  push:
+    branches: [ugg-port, main]
+    paths:
+      - '.github/workflows/build-root.yml'
+      - '.github/build-root-trigger'
   workflow_dispatch:
     inputs:
       ipsw_url:
