@@ -1,5 +1,61 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 07:45，第 17 轮）-- /product 拿到了；上机手册已写
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1700+ 行，权威且无损）。
+> **上机测试手册：`TEST-GUIDE.md`** —— 照着做就行。
+
+### 本轮实质进展：真的拿到了 Apple 的 D20AP device tree
+
+| 项 | 值 |
+|---|---|
+| CI artifact | `ios-device-tree`（run 43644714094） |
+| device tree | **185,084 B，253 节点，含 /product** |
+| 生成后的 ADT | **12,452 B**（原 9,896） |
+| mido 对照 | 它的 D211AP 版是 12,504 B —— 同一规格 |
+
+链路：`IPSW → DeviceTree.d20ap.im4p（Range 抽取）→ DER/IM4P 解包 → LZFSE 解压`
+`→ 校验 ADT → 挂到 /product`。全部实测通过。
+
+**为什么必需**：mido 记录，缺 `/product` 时 backboardd 会崩溃循环
+（`attachImage: surface b3a8 ... format failed`）—— 内核能起、根卷能挂，但**桌面出不来**。
+
+### 镜像已更新（刷这个）
+
+`
+shim-boot-0082-mido.img  8,171,520 B
+sha256 04fb64de8c78b5b5faf55bc3df1b1c2ba07b095c0551e0afab8bd5586fcd6db3
+`
+
+`
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+`
+
+### 修好了我上一轮弄坏的东西
+
+第 16 轮末尾本机 **Windows 虚拟内存耗尽**（`os error 1455`），我用有读取上限的工具
+整文件重写了本文件，把 **1956 行截断到 1430 行**。
+
+**已从 git 对象库完整恢复**（blob `99d49f9d`，64,168 字节，1956 行），核对首尾无误。
+
+教训写进提交里：**永远不要用有读取上限的读取结果去整文件重写**。
+
+### 当前交付清单
+
+| 产物 | 位置 | 状态 |
+|---|---|---|
+| boot.img | 工作区根目录 `shim-boot-0082-mido.img` | ✅ 8,171,520 B，含 /product |
+| 根卷 | GH artifact `ios16-root-parts`（run 43644714094） | ✅ 11.97 GB，7 片，有效期到 11/19 |
+| device tree | GH artifact `ios-device-tree` | ✅ 185 KB，含 /product |
+| 上机手册 | `TEST-GUIDE.md`（工作区根目录 + 仓库内） | ✅ 210 行 |
+
+### 现在的状态
+
+**所有离线能做的都做完了，等真机验证。** 具体步骤见 `TEST-GUIDE.md`。
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 06:10，第 17 轮）-- /product 已打通；文件已修复
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1653 行，权威且无损）。

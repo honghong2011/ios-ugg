@@ -1651,3 +1651,65 @@ run 43644714094：**`Extract the device tree for /product (optional)` → succes
 
 本轮末尾本机 **Windows 虚拟内存耗尽**（`os error 1455 页面文件太小`），`gh` 无法启动。
 已清理 QEMU 日志（3.9 GB）与临时文件。`git` 仍可用，提交均已推送。
+
+---
+
+## 30. ★★★ 第 17 轮：真的拿到了 Apple 的 D20AP device tree
+
+### 30.1 结果（实测，不是推断）
+
+| 项 | 值 |
+|---|---|
+| artifact | `ios-device-tree`（run 43644714094） |
+| 大小 | **185,084 B** |
+| 节点数 | **253** |
+| `/product` 节点 | **存在** ✅ |
+| `ipsw_adt.py --check` | rc=0 |
+| 生成后的 ADT | 12,452 B（原 9,896） |
+
+> mido 用 D211AP 的树生成的 ADT 是 12,504 B —— 我们 12,452 B，同一规格。
+
+### 30.2 完整链路已验证
+
+```
+IPSW (5.62 GB, 从 api.ipsw.me 解析)
+  -> DeviceTree.d20ap.im4p  (zip 成员，HTTP Range 抽取)
+  -> DER/IM4P 解包
+  -> LZFSE 解压 (bvx2)
+  -> 185 KB ADT, 253 节点
+  -> adt.parse() 校验 + 查 'product' 节点
+  -> mkadt_ugg.py 把它挂到我们 ADT 的 /product
+  -> 12,452 B ADT
+```
+
+### 30.3 为什么这一步对进桌面是必需的
+
+mido 的日志：
+
+> `/product`（来自 Apple 的 D211AP DeviceTree）尚未包含 —— **只对 userland 必需**。
+
+以及缺了它的具体后果：
+
+> backboardd 崩溃循环：`attachImage: surface b3a8 ... format failed`，
+> 因为 D211AP 的 `/product` 缺失。
+
+也就是说：**没有 `/product`，内核能起来、能挂根卷、launchd 能跑，
+但 backboardd（合成器）会崩，桌面出不来。**
+
+### 30.4 镜像已更新
+
+| 项 | 值 |
+|---|---|
+| 文件 | `shim-boot-0082-mido.img` |
+| 大小 | 8,171,520 B |
+| sha256 | `04fb64de8c78b5b5faf55bc3df1b1c2ba07b095c0551e0afab8bd5586fcd6db3` |
+| 变化 | ADT 从 9,896 → 12,452 B（新增 `/product`） |
+| 结构校验 | 12 项全过 |
+
+### 30.5 顺带修好的两件事
+
+| 项 | 说明 |
+|---|---|
+| `NOTES-UGG.md` 被截断 | 第 16 轮本机虚拟内存耗尽时我用有上限的读取工具整文件重写，1956 行变 1430 行。**已从 git 对象库完整恢复**（blob `99d49f9d`，64,168 字节），并核对首尾 |
+| 交付文档 | 新增 `TEST-GUIDE.md`（210 行），一份可直接照着做的上机测试手册 |
+
