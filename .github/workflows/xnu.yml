@@ -10,8 +10,12 @@ on:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
       machine_config:
-        description: xnu MACHINE_CONFIG
-        default: UGG
+        # The board differences ride in on -DUGG_BOARD (patch 0082), which is
+        # set for MACHINE_CONFIG=SWEET in makedefs/MakeInc.def -- the same
+        # arrangement the mido port uses. Do not switch this to UGG: the
+        # libpthread/HFS/BearSSL staging scripts are gated on SWEET.
+        description: xnu MACHINE_CONFIG (keep SWEET; -DUGG_BOARD comes from 0082)
+        default: SWEET
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
@@ -30,7 +34,7 @@ env:
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
-  MACHINE_CONFIG: ${{ inputs.machine_config || 'UGG' }}
+  MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
 
 jobs:
   build:
@@ -52,9 +56,10 @@ jobs:
           git -C dxb checkout -q FETCH_HEAD
           # 12.5-14.3 use the top-level patches dir; ours go next to blacktop's
           cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
-          # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
-          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
-          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          # libfirehose_kernel is built by xcodebuild, so it never sees
+          # MACHINE_FLAGS: patch_dxb.py pins it to arm64/-mcpu=cortex-a53.
+          python3 ci/patch_dxb.py dxb/build.sh
+          grep -c "cortex-a53" dxb/build.sh
           ls dxb/patches
 
       - name: Deps

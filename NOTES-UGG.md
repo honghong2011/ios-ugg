@@ -113,6 +113,61 @@
 - 左下角应出现 `stkXXXX`（剩余栈 ÷18 的十六进制）：`stk0e29` = 65,264 B 剩；
 - 若仍有故障 → 这次是**真**故障，`pc/lr/sp/esr/far` 齐全且只报一条。
 
+## 交付物：0098（当前最新，双 bank 读数，2026-11-14 夜）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `build-m1/diag2/shim-boot-0098-twobank.img` |
+| 大小 | 8,151,040 B |
+| sha256 | `6d06b4b120a6ff3aacb69818af19b1b0f60cf79e73e4763ed09138f0383e2dec` |
+| 内核 | `ci-xnu17/kernel.development.ugg`，17,711,296 B，sha256 `192b04f3...ef6b3ab` |
+| 来源 CI | run `43599523442`（`9d64b3c`）**success**，`applied=102 skipped=4` |
+| 构造脚本 | `build-m1/mk0099.py` |
+
+**用法（RAM-only，不刷任何分区）**：
+
+`
+fastboot boot build-m1/diag2/shim-boot-0098-twobank.img
+`
+
+**四重门禁全过**：
+
+| gate | 结果 |
+|---|---|
+| `patches-skipped` | **不含 0098** |
+| `patch-report` | `applied=102`（上一轮 101） |
+| bank A 标签（`ptovn/w.pa/w.va/w.len/w.end/raend`） | **全部存在** |
+| bank B 标签（`zerva/zerolastva/...`） | **全部存在** |
+| 两组共存于同一内核 | **True** |
+
+### 屏幕布局（这次两批读数互不覆盖）
+
+| 行 | 内容 |
+|---|---|
+| 0..17 | 滚动控制台（panic dump 在其内） |
+| **18..27** | **bank A：ptov 值（0097 的内容，之前从未显示过）** |
+| **28..37** | **bank B：pmap 值（0094 的内容）** |
+| 38 | `stk` 仪表 |
+
+### 两个 bank 分别看什么
+
+**bank A（关键）**：
+
+| 槽 | 标签 | 含义 |
+|---|---|---|
+| 0 | `ptovn` | 非空 ptov 窗口数量 |
+| 1 | `w.pa` | 含 `avail_start` 的窗口起始 PA；**`ffffffffffffffff` = 不在任何窗口** |
+| 2 | `w.va` | 该窗口 VA 基址 |
+| 3 | `w.len` | 该窗口长度 |
+| 4 | `w.end` | 该窗口 PA 结束 |
+| 5 | `zerva` | `phystokv(avail_start)` 应解析到的 VA |
+| 6 | `pstart` | `avail_start` |
+| 7 | `pb` | `physmap_base` |
+| 8 | `pe` | `physmap_end` |
+| 9 | `raend` | `real_avail_end` |
+
+**bank B**：pmap 表相关的十个值（已知正常，用于对照）。
+
 ## 交付物：0097（当前最新，ptov 诊断版，2026-11-14 晚）
 
 | 项 | 值 |
