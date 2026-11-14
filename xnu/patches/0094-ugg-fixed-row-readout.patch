@@ -1,7 +1,35 @@
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
-@@ -327,21 +327,42 @@
+@@ -29,12 +29,21 @@
+ #define EARLY_ROWS ((EARLY_HEIGHT - 32u) / EARLY_CELL_H)
+ #define EARLY_COLS (EARLY_WIDTH / EARLY_CELL_W)
+ /*
+- * Row EARLY_ROWS - 1 is reserved for the stack gauge. Scrolling text must stop
+- * one row short of it: the first gauge attempt shared row 38 with the console,
+- * and the last printed line overwrote the reading every time, so the numbers
+- * never appeared on the panel.
+- */
+-#define EARLY_TEXT_ROWS (EARLY_ROWS - 1u)
++ * Screen layout, from the top:
++ *
++ *   rows 0 .. EARLY_TEXT_ROWS-1     scrolling console
++ *   rows EARLY_VAL_ROW .. +9        fixed boot readout (see sweet_early_val)
++ *   row  EARLY_ROWS - 1             stack gauge
++ *
++ * Rows are reserved, not merely written once. The first gauge attempt shared
++ * its row with the console and was overwritten; the first readout attempt was
++ * painted inside the scrolling area and the ~27-row panic dump then scrolled
++ * straight over it, so a boot that had the numbers in the binary showed none
++ * of them. The console is capped at 28 rows because the dump needs about that
++ * many, and everything from EARLY_VAL_ROW up is never touched by scrolling.
++ */
++#define EARLY_TEXT_ROWS 28u
++#define EARLY_VAL_ROW   (EARLY_ROWS - 11u)
+ #define EARLY_GAUGE_ROW (EARLY_ROWS - 1u)
+ /*
+  * Leave the first character cell blank. The phone's active area starts at the
+@@ -327,21 +336,41 @@
  }
  
  /*
@@ -33,7 +61,6 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 + * it and it costs no rows from the console. Slots start below the last stage
 + * marker row and are ordered so the most important value is highest.
 + */
-+#define SWEET_VAL_SLOT_BASE  8u
 +#define SWEET_VAL_SLOT_MAX   10u
 +
 +void
@@ -43,7 +70,7 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +		return;
 +	}
 +
-+	unsigned int row = SWEET_VAL_SLOT_BASE + slot;
++	unsigned int row = EARLY_VAL_ROW + slot;
 +	unsigned int col = EARLY_LEFT_MARGIN;
 +
 +	while (*tag && col < EARLY_TEXT_COLS) {
