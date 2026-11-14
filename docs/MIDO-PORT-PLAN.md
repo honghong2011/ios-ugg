@@ -1580,3 +1580,74 @@ if (sweet_console_muted && !panic_active()) {
 
 **panic 时即使 `sweetfb_noconsole=1` 静音了控制台，也会重新绘制。**
 所以两种结局（panic / 等待根设备）都能在屏上看到，诊断链路是完整的。
+
+---
+
+## 29. 第 16 轮：补上 `/product` 节点（进用户态必需的一项）
+
+### 29.1 为什么这块必要
+
+mido 的日志第 240 行：
+
+> `/product`（来自 Apple 的 D211AP DeviceTree）**尚未包含** —— **只对 userland 必需**。
+
+以及第 954 行记录了不包含它的后果：
+
+> backboardd 崩溃循环：`attachImage: surface b3a8 ... format failed`，
+> 因为 D211AP 的 `/product` 缺失。
+
+我的 ADT 一直**没有 `/product` 节点**。这是进入 iOS 用户态前最后一个已知缺口。
+
+### 29.2 实现
+
+| 文件 | 作用 |
+|---|---|
+| `ugg/tools/ipsw_adt.py`（新） | 从 IPSW 里抽 `DeviceTree.d20ap.im4p`，解 DER/IM4P 包装，解 LZFSE，验证 ADT 结构 |
+| `ugg/.github/workflows/build-root.yml` | IPSW 下载后运行它，产物作为 `ios-device-tree` artifact |
+| `ugg/tools/mkadt_ugg.py` | 自动从 `build/img/` 或 `xnu/adt/` 找 device tree，找到就写 `/product` |
+| `ugg/.gitignore` | 新增 `*.im4p` 和 `*d20ap.adt` 等模式，**Apple 的固件永不入库** |
+
+### 29.3 第一版的两个错误（都已修）
+
+| # | 错误 | 修法 |
+|---|---|---|
+| 1 | 检查 ADT 的 **FDT 魔数** `d00dfeed` | **ADT 不是 FDT** —— 它以 `u32 nprops / u32 nchildren` 开头，**没有魔数**。改为用 `adt.parse()` 解析并查找名为 `product` 的节点 |
+| 2 | 自动发现路径从 `ugg/tools` 往上找**三级** | 应为**两级**（仓库根是 `ios-ugg`，`ugg` 是其子目录） |
+
+**第 3 个错误更严重**：设备树步骤失败时会**阻断根卷构建**（`Build the HFS+ root` 被 skip）。
+一个可选功能不应该毁掉 20 分钟的根卷产物。已改为 `continue-on-error: true` + 内部软失败。
+
+### 29.4 第四个问题：Apple 的 device tree 是 LZFSE 压缩的
+
+首次 CI 实跑报 `payload is LZFSE-compressed`（魔数 `bvx2`）。
+
+已实现三级回退解码：
+
+1. `lzfse` CLI（`apt-get install lzfse`）
+2. `pylezfse` Python 包
+3. `liblzfse` 通过 `ctypes`
+4. 都不行才报错（**明确失败，不静默返回错误数据**）
+
+### 29.5 端到端验证（实测）
+
+用 `adt.py` 造了一个合成 fixture（带 `/product`），按 Apple 的方式做 DER/IM4P 包装：
+
+| 检查 | 结果 |
+|---|---|
+| `unwrap_im4p` 往返 | ✅ 字节完全一致 |
+| `validate` 找到 `/product` | ✅ |
+| `mkadt_ugg.py` 生成的 ADT 含 `product` 节点 | ✅ **9896 → 10124 字节，22 个节点** |
+| `--check` 有 product | ✅ rc=0 |
+| `--check` 无 product | ✅ rc=1 |
+
+> 合成 fixture 用后即删 —— 它不是 Apple 的数据，且 `.gitignore` 已阻止这类文件入库。
+
+### 29.6 CI 实跑结果
+
+run 43644714094：**`Extract the device tree for /product (optional)` → success**，
+而且 **`Build the HFS+ root` 继续执行**（不再被阻断）。
+
+### 29.7 一个环境问题（非代码）
+
+本轮末尾本机 **Windows 虚拟内存耗尽**（`os error 1455 页面文件太小`），`gh` 无法启动。
+已清理 QEMU 日志（3.9 GB）与临时文件。`git` 仍可用，提交均已推送。

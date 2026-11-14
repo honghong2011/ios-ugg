@@ -1,5 +1,69 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 06:10，第 17 轮）-- /product 已打通；文件已修复
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1653 行，权威且无损）。
+
+### 先说我修坏的东西（已恢复）
+
+上一轮末尾本机 **Windows 虚拟内存耗尽**（`os error 1455`），我用有读取上限的工具做
+整文件重写，把本文件从 **1956 行截断到 1430 行**。
+
+**已从 git 对象库完整恢复**（blob `99d49f9d`，64,168 字节，1956 行），并核对了首尾。
+
+### 本轮实质进展：`/product` 节点已打通
+
+mido 的日志说 `/product` 只对 userland 必需，缺了它的后果是 backboardd 崩溃循环
+（`attachImage: surface b3a8 ... format failed`）。我的 ADT 一直没有这个节点。
+
+| 环节 | 状态 |
+|---|---|
+| 从 IPSW 抽 `DeviceTree.d20ap.im4p` | ✅ `tools/ipsw_adt.py` |
+| 解 DER/IM4P + **LZFSE**（三级回退） | ✅ |
+| CI 实跑（run 43644714094） | ✅ **全部 15 步 success** |
+| ADT 自动带 `/product` | ✅ 9896 → 10124 字节，22 节点 |
+| Apple 固件不入库 | ✅ `.gitignore` 加 `*.im4p` / `*d20ap.adt` |
+
+该 run 的完整步骤链：
+
+`
+Free up runner disk → Install toolchain → Build apfs-fuse → Fetch the IPSW
+→ Extract the three system images → Extract the device tree for /product ✅
+→ Build the HFS+ root ✅ → Apply the bring-up tweaks → Convert to sparse and split
+`
+
+**注意**：设备树步骤现在是 `continue-on-error`，它失败也不会再阻断根卷构建
+（上一轮它曾把 20 分钟的根卷产物整个 skip 掉）。
+
+### 我修掉的三个自己的错误
+
+1. 误以为 ADT 是 FDT（检查 `d00dfeed` 魔数）—— **ADT 没有魔数**，改用 `adt.parse()` 验证
+2. 自动发现路径从 `ugg/tools` 往上找了三级（应为两级）
+3. 可选步骤失败阻断主流程（已改 `continue-on-error` + 内部软失败）
+
+### 镜像（不变）
+
+`
+shim-boot-0082-mido.img  8,169,472 B
+sha256 3fa935772411dadfdda6d14ac1fbcd0126fa6e252bcb9be1b5550ee119f453a4
+`
+
+`
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+`
+
+### 根卷（两个成功的 artifact）
+
+| run | 大小 | 分片 |
+|---|---|---|
+| 43634756880 | 11,970,598,900 B | 7 片 |
+| 43644714094 | 同上规格（本轮含 device tree） | 7 片 |
+
+**有效期到 11/19**。需 20 GB 空闲盘：`./ugg/flash-root.sh /path/with/20GB`
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 05:40，第 15 轮）-- 关键结论：QEMU 到 M2，eMMC 必须真机验
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1582 行）。
