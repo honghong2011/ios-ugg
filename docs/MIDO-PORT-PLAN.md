@@ -1503,3 +1503,80 @@ Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string
 
 教训：**QEMU 的价值完全取决于它跑的是不是真机的地址布局。**
 只对齐「内存大小」不够，`phys_base` 的 L1 索引也必须对齐。
+
+---
+
+## 28. 第 15 轮：QEMU 的 M2 到底证明了什么、没证明什么
+
+### 28.1 已证明的（很有价值）
+
+QEMU 屏幕 38 行完整解码，内核跑完了整条早期路径：
+
+```
+bsd_init: calling loopattach
+ifnet_attach: ... lo0 / gif0 / stf0 ...
+bsd_init: calling ether_family_init
+bsd_init: calling net_init_run
+bsd_init: calling inittodr
+bsd_init: calling setconf
+Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string>
+             <key>Content</key><string ID="2">Apple_HFS</string></dict>
+```
+
+| 已证明 | 说明 |
+|---|---|
+| start.s → MMU → pmap → VM bootstrap | 全部通过 |
+| IOKit / platform expert | 通过 |
+| `bsd_init` 全部子系统 | kauth / MAC / buffer / socket / domain / skywalk / memorystatus / sysctl / net / loopattach 全部完成 |
+| 显示路径 | 早期控制台 + 帧缓冲解码正常 |
+| **A1（旧路线卡死点）** | **不存在了** —— 16K VM over 4K granule 的核心修复有效 |
+
+### 28.2 **没有**证明的（必须靠真机）
+
+QEMU 屏幕里：
+
+| 字符串 | 存在？ | 原因 |
+|---|---|---|
+| `SWEET UFS` | ❌ | QEMU 没有 eMMC 硬件 |
+| `BSD root:` | ❌ | 同上 |
+| `panic` | ❌ | 没走到那一步 |
+
+内核停在 `Waiting on ... IOMedia ... Apple_HFS` —— **它在等一个永远不会出现的块设备**。
+
+**所以 QEMU 完全无法验证 eMMC 驱动、GT9xx 触摸、RPM 电源** —— 这三样都必须真机。
+
+### 28.3 一个重要的行为差异（影响判读）
+
+`iokit/bsddev/IOKitBSDInit.cpp:778`：
+
+```c
+if (strcmp(rdBootVar, "ufsroot0") == 0) {
+    int ufs_error = sweet_ufs_rootdev(root);
+    if (ufs_error) {
+        panic("IOFindBSDRoot: SWEET UFS root %s unavailable: %d", rdBootVar, ufs_error);
+    }
+}
+```
+
+**如果 eMMC 驱动初始化失败，内核是直接 panic，不是「等待根设备」。**
+
+这修正了我之前的判读预期：
+
+| 真机现象 | 含义 |
+|---|---|
+| `panic: IOFindBSDRoot: SWEET UFS root ufsroot0 unavailable: N` | **eMMC 驱动失败**（N 是 errno） |
+| `Still waiting for root device` | eMMC 驱动 OK 但**没有可挂载的 HFS+ 根卷**（还没刷根卷） |
+
+### 28.4 好消息：panic 一定能上屏
+
+`osfmk/console/serial_console.c:286`：
+
+```c
+sweet_log_append(c, size);
+if (sweet_console_muted && !panic_active()) {
+    return;
+}
+```
+
+**panic 时即使 `sweetfb_noconsole=1` 静音了控制台，也会重新绘制。**
+所以两种结局（panic / 等待根设备）都能在屏上看到，诊断链路是完整的。

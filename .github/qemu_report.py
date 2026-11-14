@@ -49,16 +49,41 @@ def main():
         % (len(body), len(printable)))
 
     low = scr.lower()
+
+    # These strings are the real milestones, in the order the kernel reaches
+    # them. bsd_init completing is the strongest signal QEMU can give here: it
+    # cannot go further because it has no eMMC, so it waits forever for an
+    # IOMedia/Apple_HFS device that will never appear (see the plan, section 28).
+    bsd_stages = [
+        'bsd_init: calling kauth_init',
+        'bsd_init: calling bufferinit',
+        'bsd_init: calling bsd_autoconf',
+        'bsd_init: calling loopattach',
+        'bsd_init: calling inittodr',
+        'bsd_init: calling setconf',
+    ]
+    seen_bsd = [s for s in bsd_stages if s in scr]
+    ann('notice', 'qemu-bsd_init', 'of %d stages: %d reached'
+        % (len(bsd_stages), len(seen_bsd)))
+
     if 'panic' in low:
         ann('error', 'qemu-panic', scr[-4000:])
+        ann('error', 'qemu-verdict', 'FAIL: kernel panicked')
+    elif 'waiting on' in low and 'iomedia' in low:
+        ann('notice', 'qemu-verdict',
+            'PASS: bsd_init complete, waiting for an IOMedia/Apple_HFS root '
+            '(M2; QEMU has no eMMC so it cannot go further)')
     elif 'waiting for root device' in low:
         ann('notice', 'qemu-verdict', 'PASS: kernel ran to the root-device wait (M2)')
-    elif 'SWEET FB' in scr or 'VM bootstrap done' in scr:
-        ann('notice', 'qemu-verdict', 'kernel reached userspace prep, stopped before M2')
+    elif len(seen_bsd) >= 4:
+        ann('notice', 'qemu-verdict', 'bsd_init mostly done (%d/%d stages)'
+            % (len(seen_bsd), len(bsd_stages)))
+    elif 'VM bootstrap done' in scr or 'SWEET FB' in scr:
+        ann('notice', 'qemu-verdict', 'kernel reached userspace prep, stopped before bsd_init')
     elif printable:
-        ann('notice', 'qemu-verdict', 'kernel is drawing text on the early console')
+        ann('warning', 'qemu-verdict', 'kernel is drawing text but stopped early')
     elif 'SWEET EARLY' in scr:
-        ann('notice', 'qemu-verdict', 'early console reached; text partly unreadable')
+        ann('warning', 'qemu-verdict', 'early console reached; text partly unreadable')
     else:
         ann('warning', 'qemu-verdict', 'no decodable console output; see qemu-screen')
     return 0
