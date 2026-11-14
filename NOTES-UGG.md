@@ -1,5 +1,84 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★ 现在这一步：镜像已就绪，等你刷机（2026-11-15 00:35）
+
+> 本章是最新状态，取代下面的「路线已切换」章节。
+
+### 你要做的（一条命令）
+
+`
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+`
+
+`
+文件    shim-boot-0082-mido.img
+大小    8,169,472 B
+sha256  7a97fee7a10275996bfcd04423867bfc64d4641732308e5ab7b75d3c3cb10af9
+`
+
+**这是 `fastboot boot`，只进内存，不刷任何分区。** 断电即恢复 Android。
+
+### 屏上该看到什么（判读指南）
+
+| 现象 | 含义 | 下一步 |
+|---|---|---|
+| 2 分钟内自动回到 fastboot | shim 拒绝了 payload，屏上会写原因（`LOADER:` 开头） | 拍照给我 |
+| 屏上 3 色带 + `SWEET EARLY` 1..4 | shim 跑通，XNU 的 start.s 在跑 | ✅ 继续看 |
+| 出现 `panic:` 或白字滚动 | XNU 起来了但中途挂 | **拍照给我**，这是最有价值的 |
+| 停在 `Still waiting for root device` | **M2 达成** | 下一步做根卷 |
+| 屏一直黑但有背光 | 可能已经进 XNU 但 fb 没接管 | 等 3 分钟再拍照 |
+| 苹果 logo | **M3/M4 达成** | 继续等锁屏 |
+| 锁屏 / 桌面 | **目标达成** | 告诉我，录一段触控 |
+
+**注意**：如果刷了根卷后第一次启动，mido 实测要 **4-8 分钟**才出苹果 logo。你现在还没刷根卷，
+所以这一版应该走到 `Still waiting for root device` 就停住（因为 userdata 现在还是 Android 的 ext4）。
+**这正是 M2 的判据。**
+
+### 已经做完的完整链条
+
+| # | 步骤 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | 恢复上游原版补丁链 `0001-0081` | ✅ | `same=84 diff=0` |
+| 2 | 重建干净基线 | ✅ | `applied=81 failed=0`，commit `2bbcef0` |
+| 3 | 移植 mido 的 `0100` 为 `0082-ugg-board.patch` | ✅ | 28 文件 +2089/-22，零冲突 |
+| 4 | 修掉 4 轮 CI 发现的错误 | ✅ | run 43613955911 **success** |
+| 5 | 内核 `applied=86`，skipped 无 0082 | ✅ | annotation 确认 |
+| 6 | shim 移植（eMMC/RPM/GT9xx）+ CI 编译 | ✅ | run 43614156236 success |
+| 7 | 生成 UGG ADT（iPhone10,4 / 750x1334） | ✅ | 9896 B |
+| 8 | 打包并校验 boot.img | ✅ | 结构 12 项全过 |
+| 9 | 交付根卷构建脚本 | ✅ | `ugg/build-root.sh` 174 行，`bash -n` 通过 |
+
+### 唯一还没做的：根卷
+
+需要你找一台 **Linux 电脑**（原生优先，WSL2 的 hfsplus 没编），磁盘 ≥ 40 GB 空闲，跑：
+
+`
+cd 任意目录
+git clone https://github.com/honghong2011/ios-ugg ugg-src   # 或者直接用你现在这份
+./ugg-src/ugg/build-root.sh ~/ugg-root
+`
+
+跑完给我三个数：
+
+`
+1. fsck 输出（应含 volume iOSRoot appears to be OK）
+2. ios16-root.img 与 ios16-root.simg 的字节数
+3. fastboot getvar partition-size:userdata 的输出
+`
+
+### 为什么根卷必须走 Linux（不是偷懒）
+
+| 步骤 | Windows/macOS 能做吗 |
+|---|---|
+| `apfs-fuse` 读 IPSW 的 APFS dmg | ❌ 没有可用实现 |
+| `mkfs.hfsplus` / `fsck.hfsplus` | ❌ 只有 Linux/BSD 版 |
+| `mount -t hfsplus -o loop` | ❌ Windows 无 loop 设备 |
+
+GitHub Actions 也不行：需要 6 GB IPSW + 16 GB 镜像 + 12 GB sparse ≈ 34 GB，ubuntu runner 只有 14 GB。
+
+---
+
+
 ## ★★ 路线已切换：照抄 ios-mido（2026-11-14 深夜）
 
 > **本章取代下面所有旧内容。** 旧的 `0082-0098` 自研补丁路线**已全部作废并归档**。
