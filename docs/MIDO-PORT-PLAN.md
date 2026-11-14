@@ -1256,3 +1256,67 @@ UGG 的 DTB 明确：`goodix@5d` 的 `vcc_i2c-supply` = `regulator-l6`（1.8 V�
 | `sweet_ufs.c` `ugg_take_over()` | eMMC 初始化到 transfer state | ✅ 已修 |
 | `ugg_input.c` 头注释 | L10 + **L6** 两路电源 | ✅ 已修 |
 | `ugg_input.c` 头注释 | QUP3 时钟、gpio10/11/64/65 引脚 | ✅ 原本就有 |
+
+---
+
+## 24. 第 11 轮：第三个「shim 欠 XNU 的步骤」——MDP 32bpp
+
+### 24.1 方法是有效的
+
+上轮总结的排查法（搜 XNU 里提到 shim 的注释）这轮立刻又找到一条：
+
+`pexpert/pexpert/arm64/SWEET.h:117`：
+
+```
+the shim switches MDP RGB0 to 32 bpp, so a frame is 720*4*1280 = 3.7 MiB
+```
+
+而 `UGG_FB_STRIDE` 就是 2880 = 720 × 4。
+
+### 24.2 实际状况：shim 完全没有 MDP 代码
+
+| 检查 | 结果 |
+|---|---|
+| `ugg/shim/*.c` 里搜 `MDP` / `RGB0` / `SRC_FORMAT` | **只匹配到一个不相干的 `RSP_R1 0x1a`** |
+| mido 的 shim | 有 `fb_to_32bpp()`（`shim.c:339`）|
+| ugg 的 `board.h` | 当时 `FB_BPP = 3`（24bpp，与 LK 一致）|
+
+**后果**：RGB0 仍是 LK 留下的 24bpp（3 B/px，stride 2160），
+而 shim 的控制台和 XNU 都按 32bpp 写（stride 2880）⇒ **每一行都错位**，
+屏幕会是斜条纹垃圾。
+
+### 24.3 修复
+
+新增 `ugg/shim/fb32.c`（约 110 行）：
+
+| 寄存器 | 值 | 说明 |
+|---|---|---|
+| `MDP_RGB0+0x30` SRC_FORMAT | `0x000236ff` | 4 B/px、4 组件、8bpc、alpha off |
+| `MDP_RGB0+0x34` SRC_UNPACK | `0x03020001` | 内存序 B, G, R, X |
+| `MDP_RGB0+0x24` SRC_YSTRIDE | `2880` | 720 × 4 |
+| `MDSS+0x2000+0x18` CTL0_FLUSH | bit 3 | 刷 RGB0，下一个 vsync 生效 |
+
+**安全措施**（照抄 mido 的做法）：**先验证当前是 LK 的已知状态**
+（`SRC_FORMAT == 0x0002243f`），不匹配就不动，并在屏上明说
+「pipe untouched, screen may be unreadable」—— 因为控制台是按 32bpp 编的，
+格式不对就会看不清，这条消息是唯一线索。
+
+同时 `board.h` 的 UGG `FB_BPP` 从 3 改成 **4**，于是 `FB_STRIDE` 自动变成 2880，
+与 XNU 的 `UGG_FB_STRIDE` 一致。
+
+`shim_main()` 里 `shim_fb_to_32bpp()` 放在**任何绘制之前**（`con_clear` 之前）。
+
+### 24.4 「shim 欠 XNU」清单（第 4 条）
+
+| XNU 侧 | 依赖 shim 做的 | 状态 |
+|---|---|---|
+| `sweet_ufs.c` | eMMC 初始化到 transfer state | ✅ 第 10 轮 |
+| `ugg_input.c` | L10 + L6 电源 | ✅ 第 10 轮 |
+| `ugg_input.c` | QUP3 时钟、gpio10/11/64/65 | ✅ 原有 |
+| **`SWEET.h`** | **MDP RGB0 切到 32bpp** | ✅ **本轮** |
+
+### 24.5 考虑过但否决的方案
+
+让 console 在运行时按实际 bpp 画（`con_bpp` / `con_stride` 变量）——
+否决理由：每个像素都要多一层分支判断，而 shim 的控制台是逐像素位图绘制，
+在 A53 上这个开销不划算。改为「编译期固定 32bpp + 切换失败时明确告警」。

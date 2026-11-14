@@ -1,5 +1,69 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 05:05，第 11 轮完）-- 刷这个镜像
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1322 行）。
+
+### 镜像
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+8,169,472 B
+sha256 f65d72194abf50588c467d3b7f14f200207cf91cae3e9fdbbb981c2a7eded03d
+```
+
+### 这版比上一版多了 MDP 32bpp 切换
+
+`SWEET.h` 里写着「the shim switches MDP RGB0 to 32 bpp」，但 ugg 的 shim
+**完全没有 MDP 代码**。RGB0 还是 LK 的 24bpp（stride 2160），而 shim 控制台和
+XNU 都按 32bpp 写（stride 2880）⇒ **每行错位，屏幕会是斜条纹**。
+
+新增 `shim/fb32.c`：验证 LK 状态 → 切 `SRC_FORMAT=0x000236ff` /
+`UNPACK=0x03020001` / `stride=2880` → flush RGB0。`FB_BPP` 3→4。
+
+### 「shim 欠 XNU 的步骤」清单（4 条，全部已补）
+
+| XNU 侧 | 依赖 shim | 轮次 |
+|---|---|---|
+| `sweet_ufs.c` | eMMC 初始化到 transfer state | 第 10 轮 ✅ |
+| `ugg_input.c` | L10 + L6 电源 | 第 10 轮 ✅ |
+| `ugg_input.c` | QUP3 时钟、gpio10/11/64/65 | 原有 ✅ |
+| `SWEET.h` | MDP RGB0 → 32bpp | **第 11 轮 ✅** |
+
+### 屏显判读（更新）
+
+```
+MDP RGB0: ADDR=90000000 FMT=0002243f STRIDE=00000870
+MDP RGB0 -> FMT=000236ff STRIDE=00000b40 (32 bpp)     <-- 成功
+EMMC HC_MODE=00000001
+ BUS POWER ON: PWRREQ=..
+LBA0 E=0 SIG=AA55 OK
+LBA1 E=0 GPT OK
+#25 F=... N=... cache
+LOG VERIFY OK
+INPUT SETUP: RPM L10 E=0 L6 E=0 CLK ON
+```
+
+| 看到 | 含义 | 动作 |
+|---|---|---|
+| `MDP: unexpected FMT ... screen may be unreadable` | 管道状态不是预期的 | **拍照**（屏可能看不清，尽量拍） |
+| `MDP RGB0 -> FMT=000236ff` | 32bpp 切换成功 | 继续 |
+| `EMMC INIT FAILED` / `BUS POWER STILL OFF` | eMMC 没起来 | **拍照** |
+| `LBA1 ... GPT OK` + 分区列表 | **eMMC 通了** ✅ | 继续 |
+| `Still waiting for root device` | 没根卷（预期，M2） | 刷根卷 |
+| `panic:` | — | **拍照** |
+
+### 根卷（不变）
+
+artifact `ios16-root-parts`（run 43634756880），11,970,598,900 B，7 片，**有效期到 11/19**。
+下载需 20 GB 空闲盘：`./ugg/flash-root.sh /path/with/20GB`
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 04:55，第 10 轮完）-- 刷这个镜像
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1258 行）。
