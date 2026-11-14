@@ -75,6 +75,63 @@
 - 左下角应出现 `stkXXXX`（剩余栈 ÷18 的十六进制）：`stk0e29` = 65,264 B 剩；
 - 若仍有故障 → 这次是**真**故障，`pc/lr/sp/esr/far` 齐全且只报一条。
 
+## 交付物：0094（当前最新，固定行读数版，2026-11-14）
+
+| 项 | 值 |
+|---|---|
+| 镜像 | `build-m1/diag2/shim-boot-0094-readoutband.img` |
+| 大小 | 8,151,040 B |
+| sha256 | `e5bef54878918eefda3574680c16b6080b3d3419a954c82116477c560c426b13` |
+| 内核 | `ci-xnu14/kernel.development.ugg`，17,301,696 B，sha256 `d9b1050e...cf1edcfb` |
+| 来源 CI | run `43541927223`（`b2b76cb`）**success**，`applied=98 skipped=4` |
+| 构造脚本 | `build-m1/mk0095.py` |
+
+**用法（RAM-only，不刷任何分区）**：
+
+`
+fastboot boot build-m1/diag2/shim-boot-0094-readoutband.img
+`
+
+**三重门禁已验证**：`_sweet_early_val` 存在、10 个 tag 字符串齐全、
+`_pmap_data_bootstrap` 由 `0x300` 增至 `0x320`。shim 与 0093 逐字节相同。
+
+### 0093 为什么没显示出数字（重要）
+
+0093 的代码**确实进了内核**（门禁全过），但屏上一个数字都没有。
+原因与 0091 的仪表**是同一类错误**：
+
+- `sweet_early_val()` 用的是 `sweet_early_putc()`，即**加入滚动控制台**。
+- 之后依次打印：SWEET FAULT(4 行) + panic 文本(4 行) + 寄存器 dump(~34 行) ≈ 42 行，
+- 而滚动环只有 39 行 ⇒ **10 个数字被从头滚出屏幕**。
+
+**教训：位置固定不够，必须落在滚动区之外。**
+
+### 0094 的屏幕分区（三个互不重叠的带）
+
+| 行 | 用途 | 宏 |
+|---|---|---|
+| 0..27 | 滚动控制台 | `EARLY_TEXT_ROWS = 28` |
+| 28..37 | 10 个读数槽 | `EARLY_VAL_ROW = EARLY_ROWS - 11` |
+| 38 | 栈仪表 | `EARLY_GAUGE_ROW` |
+
+`early_row` 被 `EARLY_TEXT_ROWS` 约束，所以 `sweet_early_clear_row()` **只可能**擦掉控制台行，
+永远碰不到读数槽和仪表。已核验无重叠：文字止于 27，读数始于 28，读数止于 37，仪表 38。
+
+### 读数槽顺序（按诊断价值排）
+
+| 槽 | 标签 | 含义 |
+|---|---|---|
+| 0 | `zerva` | 清零起始 VA |
+| 1 | `zerolastva` | 清零末尾 VA ← 与 3 比较 |
+| 2 | `physmapbase` | physmap 窗口起始 |
+| 3 | `physmapend` | physmap 窗口结束 ← 若 1 > 3 则越界 |
+| 4 | `zerolen` | memset 长度 |
+| 5 | `mem_size` | XNU 认为的内存 |
+| 6 | `realphys` | physmap 实际覆盖 ← 若 5 > 6 则不一致 |
+| 7 | `pmapstart` | 物理起始 |
+| 8 | `availstart` | 分配结束 |
+| 9 | `gphysbase` | 物理基址 |
+
 ## 交付物：0093（当前最新，诊断版，2026-11-13 深夜）
 
 | 项 | 值 |
