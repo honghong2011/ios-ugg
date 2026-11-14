@@ -137,7 +137,12 @@ jobs:
           img2simg work/ios16-root.img work/ios16-root.simg
           ls -l work/ios16-root.img work/ios16-root.simg
           mkdir -p work/parts
-          split -b ${{ inputs.part_mb }}M work/ios16-root.simg work/parts/ios16-root.simg.part
+          # Fallback required: on a push trigger inputs.part_mb is empty, which
+          # made this "split -b M" = 1 MiB chunks and produced 11416 files.
+          # 1800 MB keeps each part comfortably inside artifact limits.
+          PART_MB="${{ inputs.part_mb || '1800' }}"
+          echo "splitting into ${PART_MB} MB parts"
+          split -b "${PART_MB}M" work/ios16-root.simg work/parts/ios16-root.simg.part
           ls -l work/parts | head -20
           (cd work/parts && sha256sum * > SHA256SUMS)
           cat work/parts/SHA256SUMS

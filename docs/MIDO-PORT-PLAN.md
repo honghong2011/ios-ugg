@@ -1000,3 +1000,58 @@ bug 1-4 是 mido 的固定几何假设，真机同样会写错地址。
 
 建议：优先真机 fastboot boot，用屏显定位；QEMU 保留为回归检查，不阻塞。
 
+
+---
+
+## 20. ★★★★ 16 GB 根卷构建成功（第 8 轮，2026-11-15 03:50）
+
+### 20.1 实测结果
+
+| 项 | 值 |
+|---|---|
+| CI run | 43633269418 |
+| @@@@ios16-root.img@@@@ | **17,179,869,184 B**（16 GiB） |
+| @@@@ios16-root.simg@@@@ | **11,970,516,952 B**（11.15 GiB） |
+| @@@@fsck.hfsplus@@@@ | 三次全部 @@@@The volume iOSRoot appears to be OK.@@@@ |
+| 耗时 | HFS+ 合成 **不到 3 分钟**（比 mido 本地 20-60 分钟快得多）|
+| 总步骤 | 11 步中 10 步 success |
+
+### 20.2 这证明了什么
+
+**整条 Linux 工具链在 GitHub Actions 上完全可用**：
+
+| 步骤 | 结果 |
+|---|---|
+| 清盘 + 装工具链 | success（86 GB 可用） |
+| hfsplus 模块 + 读写测试 | success |
+| @@@@apfs-fuse@@@@ 源码构建 + install | success |
+| 从 api.ipsw.me 解析 IPSW URL | success（5.62 GiB，20H392） |
+| 下载 + 校验 zip + 读 BuildManifest | success |
+| 按角色找 OS / SystemOS / AppOS | success |
+| @@@@mkiosroot.sh@@@@ 合成 16 GiB HFS+ | success |
+| @@@@sweet-root-tweaks.py@@@@ 打移植补丁 | success |
+| @@@@img2simg@@@@ 转 sparse | success（11.15 GiB） |
+
+### 20.3 我引入的一个 bug（已修）
+
+`split -b ${{ inputs.part_mb }}M` 在 push 触发时 `inputs.part_mb` 为空，
+变成 `split -b M` = **1 MiB 分片**，产生 **11,416 个文件**。
+
+修法：加 `PART_MB="${{ inputs.part_mb || '1800' }}"`，变成 **7 个 1.8 GB 分片**。
+
+> 同类问题这是第二次（上一次是 `DEVID`/`IOSVER` 为空导致 API 404）。
+> 教训：**凡是 `${{ inputs.X }}` 都必须给 push 触发时的兜底值**。
+
+### 20.4 你要做的两步
+
+@@@@
+# 1. 下载分片
+gh run download <RUN_ID> -R honghong2011/ios-ugg -n ios16-root-parts -D parts
+cd parts && sha256sum -c SHA256SUMS
+cat ios16-root.simg.part* > ../ios16-root.simg
+
+# 2. 刷入（会清空 Android 数据，已批准）
+fastboot -S 256M flash userdata ../ios16-root.simg
+fastboot boot shim-boot-0082-mido.img
+@@@@
+
