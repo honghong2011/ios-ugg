@@ -41,6 +41,20 @@ TIMEBASE = 19200000                # soc/timer/clock-frequency = 0x124f800
 FB, FB_SIZE = 0x90000000, 720 * 4 * 1280
 FB_W, FB_H, FB_STRIDE = 720, 1280, 720 * 4
 
+###########################################################################
+# QEMU virt (-M virt,gic-version=2 -cpu cortex-a53): the same hardware
+# shape as ugg (GICv2, ARMv8.0 A53, 4K granule), so the kernel can be booted
+# and its early console decoded on a host before anyone touches the phone.
+#   GICD 0x08000000 / GICC 0x08010000  (QEMU default GICv2 frames)
+#   timebase 62500000 Hz, virtual timer = PPI 11 -> INTID 27
+#   RAM 0x40000000, so the payload phys_base moves to 0x50000000
+###########################################################################
+QEMU_GICD, QEMU_GICC = 0x08000000, 0x08010000
+QEMU_TIMEBASE = 62500000
+QEMU_VTIMER_INTID = 27
+QEMU_PHYS_BASE = 0x50000000
+QEMU_MEM_SIZE = 0x20000000
+
 # MSM8940: two clusters of four Cortex-A53, MPIDR Aff1:Aff0
 CPU_MPIDRS = [0x000, 0x001, 0x002, 0x003, 0x100, 0x101, 0x102, 0x103]
 CPU_HZ = 1401000000                # ugg's top A53 bin (435), informational only
@@ -89,9 +103,17 @@ def product_props(path):
     raise SystemExit(f'{path}: no /product node')
 
 
-def build(seed=None, product_path=None):
+def build(seed=None, product_path=None, qemu=False):
     global MODEL, TARGET, CANVAS_W, CANVAS_H, TARGET_TYPE
     phys_base, mem_size = PHYS_BASE, MEM_SIZE
+    gicd, gicc = GICD, GICC
+    gicd_size, gicc_size = GICD_SIZE, GICC_SIZE
+    timebase, vtimer_intid = TIMEBASE, VTIMER_INTID
+    if qemu:
+        phys_base, mem_size = QEMU_PHYS_BASE, QEMU_MEM_SIZE
+        gicd, gicc = QEMU_GICD, QEMU_GICC
+        gicd_size = gicc_size = 0x1000
+        timebase, vtimer_intid = QEMU_TIMEBASE, QEMU_VTIMER_INTID
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
     seed = seed if seed is not None else os.urandom(64)
@@ -134,12 +156,12 @@ def build(seed=None, product_path=None):
             ('l2-cache-id', u32(mpidr >> 8)),    # one L2 per physical cluster
             ('l3-cache-id', u32(0)),
             ('state', cstr('running' if i == 0 else 'stopped')),
-            ('timebase-frequency', u32(TIMEBASE)),
+            ('timebase-frequency', u32(timebase)),
             ('clock-frequency', u32(CPU_HZ)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(768000000)),
-            ('peripheral-frequency', u32(TIMEBASE)),
-            ('fixed-frequency', u32(TIMEBASE)),
+            ('peripheral-frequency', u32(timebase)),
+            ('fixed-frequency', u32(timebase)),
         ]))
     cpus = node('cpus', [ph(), ('#address-cells', u32(1)), ('#size-cells', u32(0))], cpu_nodes)
 
@@ -148,8 +170,8 @@ def build(seed=None, product_path=None):
         ph(),
         ('compatible', cstr('arm,gic-v2')),
         ('interrupt-controller', b''),
-        ('virtual-timer-intid', u32(VTIMER_INTID)),
-        ('reg', u64(GICD - SOC_BASE, GICD_SIZE, GICC - SOC_BASE, GICC_SIZE)),
+        ('virtual-timer-intid', u32(vtimer_intid)),
+        ('reg', u64(gicd - SOC_BASE, gicd_size, gicc - SOC_BASE, gicc_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -208,9 +230,10 @@ if __name__ == '__main__':
         MODEL, TARGET, CANVAS_W, CANVAS_H, TARGET_TYPE = IDENTITIES['iphone8plus']
     out = sys.argv[1]
     prod = sys.argv[sys.argv.index('--product') + 1] if '--product' in sys.argv else None
-    blob = adt.serialize(build(product_path=prod))
+    qemu = '--qemu' in sys.argv
+    blob = adt.serialize(build(product_path=prod, qemu=qemu))
     open(out, 'wb').write(blob)
     if '--dump' in sys.argv:
         adt.dump(adt.parse(blob)[0])
-    print(f'{out}: {len(blob)} bytes, identity {MODEL}/{TARGET}, canvas {CANVAS_W}x{CANVAS_H}',
+    print(f'{out}: {len(blob)} bytes, identity {MODEL}/{TARGET}, canvas {CANVAS_W}x{CANVAS_H}' + (', QEMU virt' if qemu else ', ugg hw'),
           file=sys.stderr)

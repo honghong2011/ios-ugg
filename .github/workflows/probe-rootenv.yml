@@ -1,0 +1,70 @@
+name: probe-rootenv
+
+# Answers one question: can the 16 GB iOS root image be built on a GitHub runner?
+# If yes, the user does not need to find a Linux box at all. It needs
+#   - ~40 GB of scratch disk (6 GB IPSW + 16 GB img + 12 GB sparse)
+#   - an hfsplus kernel module (Ubuntu ships it =m; WSL2 does not, which is why
+#     the mido port was stuck on a native Linux box)
+#   - apfs-fuse, which has no Ubuntu package but builds from source
+on:
+  push:
+    branches: [ugg-port]
+    paths: ['probe/**', '.github/workflows/probe-rootenv.yml']
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk space on every mount
+        run: |
+          echo '=== df -h ==='
+          df -h
+          echo
+          echo '=== df -h / /mnt /tmp ==='
+          for m in / /mnt /tmp /home/runner; do df -h "$m" 2>/dev/null | tail -1; done
+
+      - name: hfsplus kernel module
+        run: |
+          echo '=== built-in or module? ==='
+          grep -i hfsplus /boot/config-$(uname -r) 2>/dev/null || echo 'no config file'
+          echo '=== try to load it ==='
+          sudo modprobe hfsplus && echo 'MODPROBE OK' || echo 'MODPROBE FAILED'
+          lsmod | grep -i hfs || echo 'not in lsmod'
+          echo '=== can we make and mount an hfs+ image? ==='
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq hfsprogs
+          dd if=/dev/zero of=/tmp/t.img bs=1M count=64 status=none
+          sudo mkfs.hfsplus -v TESTVOL /tmp/t.img && echo 'MKFS OK' || echo 'MKFS FAILED'
+          sudo mkdir -p /mnt/hfstest
+          sudo mount -t hfsplus -o loop,force /tmp/t.img /mnt/hfstest && echo 'MOUNT OK' || echo 'MOUNT FAILED'
+          touch /mnt/hfstest/hello 2>/dev/null && echo 'WRITE OK' || echo 'WRITE FAILED'
+          ls -la /mnt/hfstest 2>/dev/null
+          sudo umount /mnt/hfstest 2>/dev/null || true
+          sudo fsck.hfsplus -fy /tmp/t.img && echo 'FSCK OK' || echo 'FSCK FAILED'
+
+      - name: apfs-fuse availability
+        run: |
+          echo '=== is it packaged? ==='
+          apt-cache policy apfs-fuse 2>/dev/null | head -5 || echo 'not in apt'
+          echo '=== build deps ==='
+          sudo apt-get install -y -qq libfuse3-dev cmake ninja-build zlib1g-dev libbz2-dev libssl-dev git
+          echo '=== try to build it (shallow) ==='
+          cd /tmp && git clone -q --depth 1 https://github.com/sgan81/apfs-fuse.git && cd apfs-fuse
+          git submodule update --init --depth 1 2>&1 | tail -3
+          mkdir -p build && cd build && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release > /tmp/cmake.log 2>&1
+          echo "cmake rc=$?"
+          tail -5 /tmp/cmake.log
+          ninja > /tmp/ninja.log 2>&1; echo "ninja rc=$?"
+          tail -15 /tmp/ninja.log
+          ls -la apfs-fuse/apfs-fuse 2>/dev/null || find . -name 'apfs-fuse' -type f | head -3
+
+      - name: Verdict
+        if: always()
+        run: |
+          python3 - <<'PY'
+          print('::notice title=probe::see the step logs above for df, hfsplus and apfs-fuse')
+          PY
