@@ -2463,7 +2463,7 @@ index 023086f..b34507b 100644
  	ret
  
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 6928957..c92ca00 100644
+index 6928957..52742bd 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -11,11 +11,24 @@
@@ -2491,6 +2491,31 @@ index 6928957..c92ca00 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
+@@ -92,9 +105,22 @@ sweet_early_mark(unsigned int stage, const char *label)
+ 	if (early_disabled || stage > 20) {
+ 		return;
+ 	}
++	/*
++	 * One 48-pixel square per stage, laid out in a single row at the bottom of
++	 * the panel. The layout must respect EARLY_WIDTH: mido's 1080px panel fits
++	 * 22 squares of 48, ugg's 720px panel fits 15, and stage can reach 20 -- so
++	 * on ugg the squares wrap onto a second row instead of writing past the
++	 * right edge (which is what painted row 1279 col 280 and then 0x94000000).
++	 */
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+-	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
+-		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
++	unsigned int per_row = EARLY_WIDTH / 48u;
++	if (per_row == 0u) {
++		per_row = 1u;
++	}
++	unsigned int sx = (stage % per_row) * 48u;
++	unsigned int sy = EARLY_HEIGHT - 32u - (stage / per_row) * 32u;
++	for (unsigned int y = sy; y < sy + 32u && y < EARLY_HEIGHT; y++) {
++		for (unsigned int x = sx; x < sx + 48u && x < EARLY_WIDTH; x++) {
+ 			EARLY_FB[y * EARLY_STRIDE + x] = color;
+ 		}
+ 	}
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index bec97fb..9452c84 100644
 --- a/osfmk/kern/startup.c
