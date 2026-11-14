@@ -1,0 +1,121 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -327,21 +327,42 @@
+ }
+ 
+ /*
+- * Diagnostic readout for boot paths that need to report several numbers.
+- *
+- * Uses only sweet_early_putc/hex helpers: no varargs, no _doprnt, no system
+- * registers, so it stays safe even where the earlier SP_EL0 read trapped.
+- */
+-void
+-sweet_early_val(const char *tag, uint64_t value)
+-{
+-	if (early_disabled) {
+-		return;
+-	}
+-	sweet_early_putc('\n');
+-	sweet_early_string(tag);
+-	sweet_early_putc(' ');
+-	sweet_early_hex64(value);
++ * Boot readout painted at a FIXED grid of rows, independent of the scrolling
++ * console.
++ *
++ * The first version simply printed the values through sweet_early_putc(). That
++ * is wrong here for the same reason the gauge was wrong in 0091: everything
++ * printed afterwards - the fault block, the panic text and the 28-row register
++ * dump - is far taller than the 39-row ring, so the ten numbers were scrolled
++ * off the top before the boot stopped and the panel showed none of them.
++ *
++ * A readout slot is drawn directly at its cell, so later output cannot evict
++ * it and it costs no rows from the console. Slots start below the last stage
++ * marker row and are ordered so the most important value is highest.
++ */
++#define SWEET_VAL_SLOT_BASE  8u
++#define SWEET_VAL_SLOT_MAX   10u
++
++void
++sweet_early_val(unsigned int slot, const char *tag, uint64_t value)
++{
++	if (early_disabled || slot >= SWEET_VAL_SLOT_MAX) {
++		return;
++	}
++
++	unsigned int row = SWEET_VAL_SLOT_BASE + slot;
++	unsigned int col = EARLY_LEFT_MARGIN;
++
++	while (*tag && col < EARLY_TEXT_COLS) {
++		sweet_early_glyph(col++, row, *tag++);
++	}
++	if (col < EARLY_TEXT_COLS) {
++		sweet_early_glyph(col++, row, ' ');
++	}
++	for (int shift = 60; shift >= 0 && col < EARLY_TEXT_COLS; shift -= 4) {
++		static const char digits[] = "0123456789abcdef";
++		sweet_early_glyph(col++, row, digits[(value >> shift) & 0xf]);
++	}
+ }
+ 
+ void
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -19,10 +19,12 @@
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ /*
+- * Print one tagged hex value. Deliberately no varargs and no system-register
+- * access, so it is safe to call from boot paths that may already be fragile.
++ * Paint one tagged hex value at a fixed screen slot (see sweet_early.c).
++ * No varargs and no system-register access, so it is safe to call from boot
++ * paths that may already be fragile, and no scrolling, so later output cannot
++ * evict it.
+  */
+-void sweet_early_val(const char *tag, uint64_t value);
++void sweet_early_val(unsigned int slot, const char *tag, uint64_t value);
+ void sweet_early_fault(const char *tag, uint64_t pc, uint64_t lr, uint64_t sp,
+     uint32_t esr, uint64_t far);
+ void sweet_early_panic(const char *fmt, va_list *args);
+@@ -34,8 +36,9 @@
+ 	(void)stage;
+ 	(void)label;
+ }
+-static inline void sweet_early_val(const char *tag, uint64_t value)
++static inline void sweet_early_val(unsigned int slot, const char *tag, uint64_t value)
+ {
++	(void)slot;
+ 	(void)tag;
+ 	(void)value;
+ }
+diff --git a/osfmk/arm/pmap/pmap_data.c b/osfmk/arm/pmap/pmap_data.c
+--- a/osfmk/arm/pmap/pmap_data.c
++++ b/osfmk/arm/pmap/pmap_data.c
+@@ -712,16 +712,16 @@
+ 		extern unsigned long real_phys_size;
+ 		extern vm_map_address_t physmap_base, physmap_end;
+ 
+-		sweet_early_val("pmapstruct", (uint64_t)pmap_struct_start);
+-		sweet_early_val("availstart", (uint64_t)avail_start);
+-		sweet_early_val("zerolen", (uint64_t)(avail_start - pmap_struct_start));
+-		sweet_early_val("zerva", (uint64_t)phystokv(pmap_struct_start));
+-		sweet_early_val("mem_size", (uint64_t)mem_size);
+-		sweet_early_val("realphys", (uint64_t)real_phys_size);
+-		sweet_early_val("gphysbase", (uint64_t)gPhysBase);
+-		sweet_early_val("physmapbase", (uint64_t)physmap_base);
+-		sweet_early_val("physmapend", (uint64_t)physmap_end);
+-		sweet_early_val("zerolastva", (uint64_t)(phystokv(pmap_struct_start) + (avail_start - pmap_struct_start) - 1));
++		sweet_early_val(0, "zerva", (uint64_t)phystokv(pmap_struct_start));
++		sweet_early_val(1, "zerolastva", (uint64_t)(phystokv(pmap_struct_start) + (avail_start - pmap_struct_start) - 1));
++		sweet_early_val(2, "physmapbase", (uint64_t)physmap_base);
++		sweet_early_val(3, "physmapend", (uint64_t)physmap_end);
++		sweet_early_val(4, "zerolen", (uint64_t)(avail_start - pmap_struct_start));
++		sweet_early_val(5, "mem_size", (uint64_t)mem_size);
++		sweet_early_val(6, "realphys", (uint64_t)real_phys_size);
++		sweet_early_val(7, "pmapstart", (uint64_t)pmap_struct_start);
++		sweet_early_val(8, "availstart", (uint64_t)avail_start);
++		sweet_early_val(9, "gphysbase", (uint64_t)gPhysBase);
+ 	}
+ #endif /* SWEET_FAMILY */
+ 
