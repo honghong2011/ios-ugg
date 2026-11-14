@@ -1,5 +1,73 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★ 最新状态（2026-11-15 01:10，第 7 轮）
+
+> 本章取代下面所有内容。计划与全部记录：`docs/MIDO-PORT-PLAN.md`（772 行）。
+
+### 两件大事（本轮）
+
+**1. 你不需要找 Linux 电脑了。**
+
+我之前说「根卷必须 Linux 电脑」，**那是错的**，我没实测就下了结论。新加的
+`probe-rootenv.yml` 在 ubuntu runner 上把六个前提全测了，全过：
+
+| 前提 | 实测 |
+|---|---|
+| 磁盘 | **86 GB 可用**（不是传闻的 14 GB） |
+| `modprobe hfsplus` | OK |
+| `mkfs.hfsplus` | OK |
+| `mount -t hfsplus` | OK |
+| `fsck.hfsplus` | OK |
+| `apfs-fuse` 源码构建 | **cmake rc=0 / ninja rc=0** |
+
+所以 `build-root.yml` 已经写好，**在 CI 里构建 16 GB 根卷**，切 1.8 GB 片上传。
+
+**2. 内核早期启动有了自动化验证（QEMU）。**
+
+不再只能靠屏摄判断内核死没死：CI 里加了一个 ubuntu job，用
+`-M virt,gic-version=2 -cpu cortex-a53` 启动真内核，解码帧缓冲文字，
+报告走到了哪个里程碑（start.s / arm_init / pmap / VM bootstrap / SWEET FB / waiting for root）。
+
+> 这正好覆盖旧路线卡死的整段路径。注意它**不能**验 UGG 的真实 MMIO、eMMC、面板。
+
+### 现在完全由你决定的只有一步
+
+`
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+`
+
+`
+文件    shim-boot-0082-mido.img   8,169,472 B
+sha256  7a97fee7a10275996bfcd04423867bfc64d4641732308e5ab7b75d3c3cb10af9
+`
+
+**只进内存，不刷任何分区。** 还没刷根卷，所以**正常应该停在 "Still waiting for root device"**
+—— 那就是 M2，不是失败。
+
+### 屏显判读
+
+| 看到 | 含义 | 动作 |
+|---|---|---|
+| 2 分钟内回 fastboot + `LOADER:` 原因 | shim 拒绝 payload | 拍照 |
+| `SWEET EARLY` 1..4 | XNU 在跑 | 继续看 |
+| `panic:` / 白字滚动 | **最有价值** | 拍照 |
+| `Still waiting for root device` | **M2 达成** | 告诉我，进入下一步 |
+| 黑屏但有背光，等 3 分钟 | 可能已进 XNU | 拍照 |
+
+### 下一步（M2 之后）
+
+`
+gh workflow run build-root.yml -R honghong2011/ios-ugg --ref ugg-port
+# 约 60-90 分钟，产出 ios16-root-parts（7 个 1.8 GB 分片）
+gh run download <RUN_ID> -R honghong2011/ios-ugg -n ios16-root-parts -D parts
+cd parts && sha256sum -c SHA256SUMS && cat ios16-root.simg.part* > ../ios16-root.simg
+fastboot -S 256M flash userdata ../ios16-root.simg     # 会清空 Android 数据（你已批准）
+fastboot boot shim-boot-0082-mido.img
+`
+
+---
+
+
 ## ★★★ 现在这一步：镜像已就绪，等你刷机（2026-11-15 00:35）
 
 > 本章是最新状态，取代下面的「路线已切换」章节。

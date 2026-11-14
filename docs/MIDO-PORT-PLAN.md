@@ -721,3 +721,52 @@ cat ios16-root.simg.part* > ../ios16-root.simg
 | 16 GiB HFS+ 合成耗时 | mido 本地 20-60 分钟；runner 磁盘快，预计 30-50 分钟 |
 | 总时长 | 预计 60-90 分钟，workflow 超时设 350 分钟，够 |
 | 免费额度 | public 仓库的 Actions 分钟数免费且不限量 |
+
+---
+
+## 15. 本轮（第 7 轮）新增与结论
+
+### 15.1 三件事
+
+| # | 事情 | 结果 |
+|---|---|---|
+| 1 | **推翻「根卷必须 Linux 电脑」的判断** | 六项前提在 ubuntu runner 上全部实测通过，已写 `build-root.yml` |
+| 2 | **QEMU 早期启动验证** | `tools/qemu-ugg.py` + `mkadt_ugg.py --qemu`，第一次放错 job（macOS 上没有 apt-get）已修正 |
+| 3 | 修正 `build-root.yml` 的两个必错点 | 嵌套 sudo（无 tty）、`./ugg/` 路径（仓库根就是 ugg） |
+
+### 15.2 QEMU 验证为什么重要
+
+这一轮之前，判断内核是否活着**只能靠屏摄**。QEMU 把这件事变成自动的：
+
+`
+CI: build (macOS)  ->  kernel artifact
+    qemu  (ubuntu)  ->  下载 kernel，用 -M virt,gic-version=2 -cpu cortex-a53 启动
+                    ->  解码帧缓冲文字
+                    ->  报里程碑：start.s / arm_init / pmap / VM bootstrap /
+                       platform expert / SWEET FB / waiting for root device
+`
+**这正好覆盖旧路线卡死的整段路径**（start.s → MMU → pmap → bsd_init）。
+如果 QEMU 能走到 `VM bootstrap done` 甚至 `SWEET FB`，就证明 0082 的
+16K-VM-over-4K 方案是对的，之前那个 `esr 0x9600004f` 已经不存在。
+
+### 15.3 QEMU 的局限（不能吹）
+
+| 能验 | 不能验 |
+|---|---|
+| start.s / MMU / pmap / boot_args 契约 | UGG 的真实 MMIO（GICD 0x0b000000、eMMC、面板） |
+| EL1 异常向量 / 早期控制台 | RPM/SPMI 电源 |
+| 内存布局与 physmap | 触摸 |
+
+所以 QEMU 通过 ≠ 真机能进桌面。它只是把「内核逻辑对不对」和「硬件对不对」分开。
+
+### 15.4 根卷这条线的关键数字
+
+| 项 | 值 |
+|---|---|
+| runner 可用磁盘 | **86 GB** |
+| IPSW | 约 5-6 GB |
+| HFS+ 镜像 | 16 GiB |
+| sparse 产物 | 约 12 GB |
+| 切片大小 | 1.8 GB × 7 片（artifact 单文件上限 10 GB） |
+| 预计耗时 | 60-90 分钟 |
+| 成本 | public 仓库免费 |
