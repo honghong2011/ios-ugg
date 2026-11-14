@@ -1,5 +1,89 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 05:10，第 12 轮完）-- 刷这个镜像
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`（1373 行）。
+
+### 镜像
+
+```
+fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
+```
+
+```
+8,169,472 B
+sha256 9149b117ffaae6d19e44e792c046e807f59dec1485bd36de7207b14fd29359fa
+```
+
+### 这版新增：启动门禁（照抄 mido）
+
+mido 不是无条件跳 XNU，而是：
+
+```c
+if (fb == 0) {   /* XNU needs the 32 bpp framebuffer; never boot it on LK's 24 bpp */
+    loader_boot(dtb);
+}
+```
+
+我的 shim 之前是无条件跳。这很危险：**如果 MDP 切换失败，XNU 会在 24bpp 面板上
+按 32bpp 渲染，屏幕不可读 —— 那就无法区分「显示故障」和「内核故障」**，
+而刷小镜像的唯一目的就是读屏。
+
+现在 `fb32 != 0` 时：
+
+```
+FB32    FAILED: not booting XNU (see MDP line above)
+HOLD    POWER to reboot
+```
+
+屏上留下的是 shim 自己可读的输出。
+
+### 累计已修的 5 个「shim 欠 XNU 的步骤」
+
+| XNU 侧 | 依赖 shim | 轮次 |
+|---|---|---|
+| `sweet_ufs.c` | eMMC 初始化到 transfer state | 10 ✅ |
+| `ugg_input.c` | L10 + L6 电源 | 10 ✅ |
+| `ugg_input.c` | QUP3 时钟、gpio10/11/64/65 | 原有 ✅ |
+| `SWEET.h` | MDP RGB0 → 32bpp | 11 ✅ |
+| mido `shim_main` | **32bpp 失败则不跳 XNU** | **12 ✅** |
+
+### 屏显预期（从上到下）
+
+```
+SHIM    ugg loader + board probe
+MDP RGB0: ADDR=90000000 FMT=0002243f STRIDE=00000870
+MDP RGB0 -> FMT=000236ff STRIDE=00000b40 (32 bpp)
+EMMC HC_MODE=00000001
+ PRES=... HCTL=... CLK=... HCTL2=...
+ BUS POWER ON: PWRREQ=..
+LBA0 E=0 SIG=AA55 OK
+LBA1 E=0 GPT OK
+#25 F=... N=... cache        <- 你的真实分区表
+CACHE F=... N=...
+LOG TO CACHE ENABLED
+LOG VERIFY OK
+INPUT SETUP: RPM L10 E=0 L6 E=0 CLK ON
+LOADER  <原因>
+```
+
+| 看到 | 含义 | 动作 |
+|---|---|---|
+| `MDP: unexpected FMT` + `FB32 FAILED: not booting XNU` | 管道状态异常，已拒绝启动 | **拍照**（屏或许还能看清） |
+| `EMMC INIT FAILED` / `BUS POWER STILL OFF` | eMMC 没起来 | **拍照** |
+| `LBA1 ... GPT OK` + 分区列表 | **eMMC 通了** ✅ | 继续 |
+| `Still waiting for root device` | 没根卷（预期，M2） | 刷根卷 |
+| `panic:` | — | **拍照** |
+| 苹果 logo | 根卷挂载成功 | 等锁屏 |
+
+### 根卷（不变）
+
+artifact `ios16-root-parts`（run 43634756880），11,970,598,900 B，7 片，**有效期到 11/19**。
+本机 C: 只剩 7.3 GB，需在 20 GB 空闲的机器上：`./ugg/flash-root.sh /path/with/20GB`
+
+---
+
+
 ## ★★★★★ 最新（2026-11-15 05:05，第 11 轮完）-- 刷这个镜像
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1322 行）。

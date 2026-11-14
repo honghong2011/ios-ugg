@@ -1320,3 +1320,54 @@ the shim switches MDP RGB0 to 32 bpp, so a frame is 720*4*1280 = 3.7 MiB
 让 console 在运行时按实际 bpp 画（`con_bpp` / `con_stride` 变量）——
 否决理由：每个像素都要多一层分支判断，而 shim 的控制台是逐像素位图绘制，
 在 A53 上这个开销不划算。改为「编译期固定 32bpp + 切换失败时明确告警」。
+
+---
+
+## 25. 第 12 轮：照搬 mido 的启动门禁
+
+### 25.1 发现的架构差异
+
+mido 的 `shim_main` 不是无条件跳 XNU，而是把跳转包在一个条件里：
+
+```c
+if (fb == 0) {   /* XNU needs the 32 bpp framebuffer; never boot it on LK's 24 bpp */
+    input_setup();
+    perf_boost();
+    rpm_cx_level(0x100);
+    emmc_mode = sdhc_fast(...);
+    loader_boot(dtb);
+}
+```
+
+我的 shim 是：先切 32bpp，然后**无条件**跳。
+
+### 25.2 为什么这个门禁重要
+
+如果 MDP 切换失败（管道处于未测量状态），而 XNU 仍然启动：
+
+| 后果 |
+|---|
+| 内核按 32bpp 渲染，但面板按 24bpp 扫描 ⇒ 屏幕不可读 |
+| **无法区分「显示故障」和「内核故障」** |
+| 用户拍的照片没有诊断价值 —— 而这正是刷小镜像的唯一目的 |
+
+### 25.3 实现
+
+| 文件 | 改动 |
+|---|---|
+| `fb32.h` / `fb32.c` | `shim_fb_to_32bpp()` 返回 `int`：0 = 已是/已切成 32bpp，-1 = 状态不识别、未触碰 |
+| `shim.c` | `int fb32 = shim_fb_to_32bpp();`，跳转前判断 |
+
+`fb32 != 0` 时：
+
+```
+FB32    FAILED: not booting XNU (see MDP line above)
+HOLD    POWER to reboot
+```
+
+然后 `wfe` 死循环。**屏上最后留下的是 shim 自己可读的输出**，而不是内核在错误像素格式下的乱码。
+
+### 25.4 顺带确认的一件事
+
+XNU 侧的 eMMC 失败路径本身是对的：`ugg_take_over()` 失败会 `printf` 并返回 `ENXIO`，
+上层转成「等待根设备」重试。所以只要 shim 把卡初始化好，真失败也能在持久日志里看到原因。
