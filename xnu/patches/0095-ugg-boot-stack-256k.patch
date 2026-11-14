@@ -1,15 +1,15 @@
 diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
 --- a/osfmk/mach/arm/vm_param.h
 +++ b/osfmk/mach/arm/vm_param.h
-@@ -351,14 +351,28 @@
+@@ -349,12 +349,30 @@
+  * 95.9% of the stack already consumed before any fault was handled.
+  * CHECK_KERNEL_STACK then ran, found SP_EL0 below the stack, and panicked
   * correctly: the guard page turned a silent stack smash into a reported
-  * fault, at the cost of stopping the boot.
-  *
-- * CHECK_KERNEL_STACK then ran, found SP_EL0 below the stack, and panicked
-- * correctly: the guard page turned a silent stack smash into a reported
 - * fault, at the cost of stopping the boot. Give UGG a 4x early stack; these
 - * are per CPU and the memory is negligible on a 4 GiB device. The assembly
 - * checks read INTSTACK_SIZE_NUM from genassym, so they follow this constant.
++ * fault, at the cost of stopping the boot.
++ *
 + * 0090 gave UGG a 4x stack (64 KiB) and 0094 finally measured the real need.
 + * The panel's fixed readout proved the pmap tables themselves were fine, and
 + * the panic sp of 0xfffffe00080afe30 then gives the arithmetic directly:
