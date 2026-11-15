@@ -2047,7 +2047,7 @@ index 06bb568..2b727c3 100644
  	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index a1f2a91..3cf8124 100644
+index a1f2a91..88cd0e5 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
 @@ -38,6 +38,9 @@
@@ -2060,7 +2060,7 @@ index a1f2a91..3cf8124 100644
  #include <arm/cpuid_internal.h>
  #include <arm/cpu_capabilities.h>
  #include <console/serial_protos.h>
-@@ -1241,7 +1244,33 @@ ml_get_cpu_number_local(void)
+@@ -1241,7 +1244,38 @@ ml_get_cpu_number_local(void)
  	MRS(mpidr_el1_value, "MPIDR_EL1");
  	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
  
@@ -2084,18 +2084,23 @@ index a1f2a91..3cf8124 100644
 +	 */
 +	if (cpu_id < 0 || cpu_id > (unsigned int)ml_get_max_cpu_number()) {
 +		/*
-+		 * Deliberately NOT printf(). This runs inside kernel_startup_bootstrap(),
-+		 * which is where printf itself is being brought up, so calling it here
-+		 * risks recursing into an uninitialised console. sweet_early_mark() is
-+		 * the bootstrap console and is what printed the stage banners already.
++		 * Do not die here, and do not use printf either: this runs inside
++		 * kernel_startup_bootstrap(), where printf is only now being brought up.
++		 * sweet_early_* is the bootstrap console that printed the stage banners.
++		 *
++		 * The MPIDR is printed by hand because it is the one number that explains
++		 * WHY the lookup failed -- it is what the topology table is keyed on.
 +		 */
-+		sweet_early_mark(90, "cpu map: unknown core, using boot cpu");
++		unsigned int masked = (unsigned)((uint32_t)mpidr_el1_value &
++		    (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK));
++		sweet_early_note("SWEET CPU MAP: mpidr,key=", mpidr_el1_value, masked);
++		sweet_early_note("SWEET CPU MAP: maxcpu,=", (uint64_t)ml_get_max_cpu_number(), (uint64_t)cpu_id);
 +		cpu_id = (unsigned int)ml_get_boot_cpu_number();
 +	}
  
  	return cpu_id;
  }
-@@ -1256,7 +1285,10 @@ ml_get_cluster_number_local()
+@@ -1256,7 +1290,10 @@ ml_get_cluster_number_local()
  	MRS(mpidr_el1_value, "MPIDR_EL1");
  	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
  
@@ -2524,7 +2529,7 @@ index 023086f..b34507b 100644
  	ret
  
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 6928957..1ebaa09 100644
+index 6928957..e24d69e 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -11,11 +11,32 @@
@@ -2610,7 +2615,40 @@ index 6928957..1ebaa09 100644
  				}
  			}
  		}
-@@ -92,10 +128,23 @@ sweet_early_mark(unsigned int stage, const char *label)
+@@ -78,6 +114,7 @@ sweet_early_putc(char c)
+ 	early_col++;
+ }
+ 
++
+ static void
+ sweet_early_string(const char *s)
+ {
+@@ -86,16 +123,48 @@ sweet_early_string(const char *s)
+ 	}
+ }
+ 
++void
++sweet_early_note(const char *s, uint64_t v, uint64_t w)
++{
++	static const char hex[] = "0123456789ABCDEF";
++	if (early_disabled) {
++		return;
++	}
++	while (*s) {
++		sweet_early_putc(*s++);
++	}
++	for (int i = 60; i >= 0; i -= 4) {
++		sweet_early_putc(hex[(v >> i) & 0xf]);
++	}
++	sweet_early_putc(',');
++	for (int i = 28; i >= 0; i -= 4) {
++		sweet_early_putc(hex[(w >> i) & 0xf]);
++	}
++	sweet_early_putc('\n');
++}
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
  	if (early_disabled || stage > 20) {
  		return;
  	}
@@ -2637,7 +2675,7 @@ index 6928957..1ebaa09 100644
  		}
  	}
  	__asm__ volatile("dsb sy" ::: "memory");
-@@ -129,7 +178,7 @@ void
+@@ -129,7 +198,7 @@ void
  sweet_early_relocate(uint64_t base)
  {
  	sweet_early_mark(8, "leaving bootstrap TTBR0");
@@ -2646,6 +2684,27 @@ index 6928957..1ebaa09 100644
  	__asm__ volatile("dsb sy" ::: "memory");
  	sweet_early_mark(9, "kernel framebuffer VA live");
  }
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..a2d8d31 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -8,6 +8,7 @@
+ 
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
++void sweet_early_note(const char *s, uint64_t v, uint64_t w);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+@@ -19,6 +20,8 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)label;
+ }
+ static inline void sweet_early_disable(void) {}
++static inline void sweet_early_note(const char *s, uint64_t v, uint64_t w)
++{ (void)s; (void)v; (void)w; }
+ #endif
+ 
+ #endif
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
 index 384118e..6d50097 100644
 --- a/osfmk/console/video_console.c
