@@ -1,6 +1,114 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-15 08:45，第 18 轮）-- 收到首张真机照片，诊断完成
+## ★★★★★ 最新（2026-11-15 10:00，第 19 轮）-- 自检图判定：几何修好了；真凶是看门狗
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`。上机手册 `TEST-GUIDE.md`。
+
+### 用户的照片说明了什么（三条结论）
+
+照片内容：黑色背景，**闭合的白色边框**，三条横条自上而下 **红 → 蓝 → 绿**，
+一条**竖直**白线，底部白条，右下洋红块。之后文字探测界面显示正常，
+再之后**纯红屏，然后手机自己重启**。
+
+**结论一：24bpp 几何修复成功。** ✅
+
+| 判据 | 预期 | 照片 | 判定 |
+|---|---|---|---|
+| 边框闭合 | 四边都有 | 四边都有 | ✅ |
+| 横条水平 | 水平 | 水平 | ✅ |
+| 竖线竖直 | 竖直 | 竖直 | ✅ |
+| 底部白条可见 | y=1200 可见 | 可见 | ✅ |
+| 洋红块在右下 | 是 | 是 | ✅ |
+
+pitch=2160 完全正确，剪切彻底消失。**上一轮的 32bpp→24bpp 诊断是对的。**
+
+**结论二（新 bug）：G/B 通道互换。** 我画的是 红(y=0)→绿(y=100)→蓝(y=200)，
+屏上是 红→**蓝→绿**。面板实际是 BGR 顺序，而 `early_px()` / `con_put()` 写的是
+RGB 字节序。**这不影响读日志**（文字是白色，R=G=B），所以排在后面。
+
+**结论三（真凶）：手机自己重启 = APSS 看门狗咬的。** ⚠️
+
+红屏是 shim 自己的 `con_clear(RED)`（`shim.c` 的 shim_main），
+说明 shim **已经跑到跳内核那一步**，然后固定时间后复位。
+
+根因：**LK 在交出控制权前装了 Qualcomm APSS 看门狗，之后不再喂狗。
+Linux 有对应驱动关掉它，XNU 没有。** 所以跳进去后固定时间必复位 ——
+这正是为什么每次日志都活不到被抓取。
+
+设备树实证（`device-dumps/dt/base/soc/qcom,wdt@b017000`）：
+
+```
+reg            = <0xb017000 0x1000>
+qcom,bark-time = 0x3a98  (15000 ms)
+qcom,pet-time  = 0x2710  (10000 ms)
+compatible     = "qcom,msm-watchdog"
+```
+
+### 本轮改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `shim/wdt.c`（新） | 读 CTRL/CTRL1/LOAD/VAL/BARK/BITE/STATUS；**仅当 EN 已置位**才关；先把超时拉到 120s/300s 再清 EN |
+| `shim/wdt.h`（新） | 接口 |
+| `shim/shim.c` | 控制台初始化**提前**到看门狗之前（否则红屏把报告擦掉）；删掉 12 秒自检图 |
+| `shim/build.sh` | 加入 `wdt.c`，移除 `selftest.c` |
+
+**为什么先拉长超时再关**：万一 EN 位被 TrustZone 保护、清的没生效，
+手机也有几分钟而不是 15 秒。RESET 寄存器（0x14）**永不写**。
+
+### 新镜像（刷这个）
+
+```
+shim-boot-0082-mido.img  8,171,520 B
+sha256 8ce7317e71787dd77f838c2981a103b6a8b9b276241f4f1e12d600e41bbb81db
+```
+
+```
+fastboot boot C:\\Users\\Administrator\\Desktop\\ios-ugg\\shim-boot-0082-mido.img
+```
+
+已核实镜像内（解 gzip 后）含 `WDT CTRL=` / `WDT STOP was=` / `WDT LOAD=`，
+且 `selftest` 已消失；payload 里 `/product` 存在。
+
+### 这次开机应该看到什么
+
+不再有 12 秒自检图。开机直接是：
+
+```
+SHIM ugg loader + board probe      <- 先红屏清屏
+BOOT WDT CTRL=xxxxxxxx C1=... ST=... ARMED 或 off
+BOOT WDT LOAD=... VAL=... BARK=... BITE=...
+WDT STOP was=... now=... ok 或 STILL ARMED   <- 仅当原本 ARMED
+PREVBOOT xxxxxxxx
+INITRD ...
+EMMC / CACHE / LOG TO CACHE ...
+RGB0 ADDR=... FMT=... STRIDE=...
+XNU jumping ...
+```
+
+**关键判据（拍这一段就够）：**
+
+| 看到 | 含义 |
+|---|---|
+| `WDT ... ARMED` 然后 `WDT STOP ... ok` | ✅ 看门狗已关，启动不再被咬 |
+| `WDT ... off` | 本来就没装，复位另有原因 |
+| `WDT STOP ... STILL ARMED` | TZ 保护，只能靠拉长的超时 |
+| 卡住不再重启 | ✅ 本轮目标达成 |
+
+### 取日志的两条路（下一步）
+
+1. **屏拍**：启动不再被重启打断，可以拍到更多行。
+2. **cache 分区读日志**：`emmc.c` 已把 64 KiB 控制台日志写进 cache 分区
+   （看到 `LOG TO CACHE ENABLED` 之后就有）。
+
+### 还没做的
+
+- G/B 互换（不影响读日志，排在后面）
+- 根卷刷入（需要 ≥20 GB 空闲，C: 只有 8 GB）
+- 触屏 / 桌面态
+
+---
+
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1776 行）。上机手册 `TEST-GUIDE.md`。
 
