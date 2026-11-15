@@ -67,6 +67,42 @@ static inline void __attribute__((unused)) wr8(uintptr_t a, uint8_t v) { *(volat
 extern char secondary_entry[];
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
+
+/*
+ * Stage breadcrumb in IMEM.
+ *
+ * The screen cannot tell us how far the PREVIOUS boot got, because it is
+ * repainted from scratch every time. IMEM is not: it holds its contents across
+ * a warm reset. So every stage writes a number here, and the next boot reads it
+ * before anything else and prints "LAST=<n>". That single number distinguishes
+ * the three cases that used to be indistinguishable from a photograph:
+ *
+ *   1..N   the shim itself stopped there
+ *   XNU    the shim reached the jump, so the reboot came from the kernel
+ *   gone   IMEM was cleared, so something colder than a warm reset happened
+ */
+#ifdef IMEM_STAGE
+static void
+stage_set(unsigned int id)
+{
+	*(volatile uint32_t *)(uintptr_t)IMEM_STAGE = id;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+static unsigned int
+stage_prev(void)
+{
+	unsigned int v = *(volatile uint32_t *)(uintptr_t)IMEM_STAGE;
+	/* A never-written word reads as all ones or as garbage; report only sane ids. */
+	if (v > 0x10000u) {
+		return 0xffffffffu;
+	}
+	return v;
+}
+#define STAGE(id)	stage_set(id)
+#else
+#define STAGE(id)	do { } while (0)
+#endif
 static volatile uint64_t sec_mpidr[NR_CPUS];
 #if !GIC_IS_V2
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
@@ -475,6 +511,12 @@ void shim_main(uint64_t dtb)
 	stage = "loader";
 	con_log_init();
 	con_clear(RED);
+	/*
+	 * First line on purpose: this is the value the previous boot left behind,
+	 * and it is the only evidence that survives a reboot.
+	 */
+	con_hex("LAST", (uint64_t)stage_prev());
+	con_puts(" (stage of the previous boot)\n");
 #if defined(BOARD_HAS_PROBE)
 	con_str("SHIM", BOARD_NAME " loader + board probe");
 #else
@@ -488,39 +530,66 @@ void shim_main(uint64_t dtb)
 	 * is that the stride the panel scans equals what the console writes. See
 	 * fb32.c.
 	 */
-	stage = "fb";
+	STAGE(2); stage = "fb";
 	shim_fb_report();
 	con_skip();
 
-	stage = "wdt";
+	STAGE(3); stage = "wdt";
 	shim_wdt_report("BOOT");
 	shim_wdt_disable();
 	con_hex("PREVBOOT", shim_reset_reason());
 	con_skip();
 
 	/*
-	 * Board bring-up BEFORE the jump into XNU.
-	 *
-	 * XNU does not initialise the eMMC itself: sweet_ufs.c only resets the
-	 * timeout counter in ugg_take_over() and then expects the card to be in
-	 * the transfer state already (its failure message is "card not in transfer
-	 * state after the shim"), because the shim it was written for ran an eMMC
-	 * init first. Without this step the root device never appears and the
-	 * kernel waits for a root device forever.
-	 *
-	 * The touch rail and pads are set up here too: input_setup() leaves the RPM
-	 * LDO vote and the pin mux in place, which the XNU input driver relies on.
+	 * eMMC first, and it is REQUIRED: XNU does not initialise the card itself.
+	 * sweet_ufs.c only resets the timeout counter in ugg_take_over() and then
+	 * expects the card to already be in the transfer state (its failure message
+	 * is "card not in transfer state after the shim"), because the shim it was
+	 * written for ran an eMMC init first. Without this the root device never
+	 * appears and the kernel waits for Apple_HFS forever.
 	 */
-	stage = "emmc";
+	STAGE(4); stage = "emmc";
 	ugg_emmc_probe();
 	con_skip();
-	stage = "input";
+
+	/*
+	 * The RPM touch-rail vote is OFF, and that is the fix for the reboot.
+	 *
+	 * rpm.c's own header records the trap: a write to an RPM-owned LDO that the
+	 * RPM arbiter does not expect is "an arbiter violation and resets the SoC".
+	 * The last photograph ends at "REOPEN: TX ST=2 RX ST=2" -- the RPM channel
+	 * had just been opened -- and the next thing that code does is vote L10,
+	 * which is mido's touch rail. On ugg that request resets the phone: the
+	 * console scrolled, then the machine rebooted, with nothing after REOPEN.
+	 *
+	 * Touch is not needed to reach iOS. It is needed to USE it, and that is a
+	 * later problem than booting. Until the correct regulator for this board is
+	 * identified (from its own device tree, not from mido's), the vote stays off
+	 * so the boot can get past it.
+	 */
+	STAGE(5); stage = "input";
+#if BOARD_TOUCH_RAIL
 	input_setup();
-	con_skip();
-	stage = "perf";
-	perf_boost();
+#else
+	con_str("INPUT", "skipped: RPM LDO vote resets this SoC");
+#endif
 	con_skip();
 
+	/*
+	 * perf_boost() is off for the same class of reason: perf.c reads an
+	 * XPU-protected RPM register last, and the comment there already warns that
+	 * touching it resets the SoC. A faster CPU is worth nothing to a boot that
+	 * dies before the jump.
+	 */
+	STAGE(6); stage = "perf";
+#if BOARD_PERF_BOOST
+	perf_boost();
+#else
+	con_str("PERF", "skipped: leave clocks as LK set them");
+#endif
+	con_skip();
+
+	STAGE(7);	/* 7 = about to enter XNU; a reboot from here on is the kernel's */
 	stage = "loader";
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);

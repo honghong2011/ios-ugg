@@ -142,7 +142,19 @@ ugg_emmc_flush_log(void)
 	}
 	if (e) {
 		emmc_code = 8;
-		con_puts("LOG WRITE E\n");
+		/*
+		 * Print the code. "LOG WRITE E" alone said a write failed but not
+		 * whether it was the command (the number is the CMD24 error), the
+		 * card status, or the programming timeout, and those need completely
+		 * different fixes.
+		 */
+		con_puts("LOG WRITE E=");
+		con_dec((uint64_t)e);
+		con_puts(" ERR=");
+		con_hex(last_err, 4);
+		con_puts(" SEC=");
+		con_dec((uint64_t)i);
+		con_putc('\n');
 		return;
 	}
 	int ok = !sdhc_read(cache_first, blk) &&

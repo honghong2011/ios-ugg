@@ -143,9 +143,23 @@ static void con_scroll(void)
 				base[i] = base[i + shift];
 			}
 		}
-		/* Clear the row that just scrolled into view. */
-		for (uintptr_t i = total - shift; i < total; i++) {
-			base[i] = (uint8_t)(con_bg & 0xff);
+		/*
+		 * Clear the row that just scrolled into view.
+		 *
+		 * This has to write the background colour the same way put_char_in()
+		 * does. Writing only (con_bg & 0xff) was a bug: red is 0xffff0000, so
+		 * that byte is zero and the freshly cleared row came out BLACK against
+		 * a red console. The photograph of the first scrolling build shows
+		 * exactly that -- the last few lines sat on a dark band.
+		 */
+		for (uintptr_t i = total - shift; i < total; i += FB_BPP) {
+#if FB_BPP == 4
+			*(volatile uint32_t *)(base + i) = con_bg;
+#else
+			base[i + 0] = (uint8_t)(con_bg >> 16);
+			base[i + 1] = (uint8_t)(con_bg >> 8);
+			base[i + 2] = (uint8_t)con_bg;
+#endif
 		}
 	}
 }

@@ -112,6 +112,33 @@
 #define PSHOLD_PHYS		0x004ab000UL
 #define IMEM_RESTART_REASON	0x0860065cUL
 #define IMEM_BASE		0x08600000UL
+/*
+ * Stage breadcrumb.
+ *
+ * IMEM survives a warm reset, unlike the screen and unlike anything the
+ * shim prints. That makes it the only way to answer "how far did the last
+ * boot get" after the phone has already rebooted: write a small number here
+ * as each stage begins, and read it back at the top of the next boot.
+ *
+ * 0x600 sits in the same IMEM page as the restart reason at 0x65c.
+ */
+#define IMEM_STAGE		0x08600600UL
+
+/*
+ * Touch rail and performance boost are OFF until this board's own regulator ids
+ * are identified.
+ *
+ * Both reach into the RPM, and rpm.c documents that a write the arbiter does
+ * not expect RESETS THE SoC. The console photograph of the first scrolling
+ * build stops at "REOPEN: TX ST=2 RX ST=2" -- immediately before the L10 vote
+ * that input_setup() performs -- and the phone then rebooted with nothing else
+ * printed. L10 is mido's touch rail, not necessarily ugg's.
+ *
+ * Neither is needed to reach iOS: touch matters for USING it, not booting it.
+ * So both wait behind these switches.
+ */
+#define BOARD_TOUCH_RAIL	0
+#define BOARD_PERF_BOOST	0
 
 #define TLMM_BASE	0x01000000UL
 
@@ -199,4 +226,17 @@
 #define PTIMER_INTID	18
 #define SGI_INTID	1
 
+#endif
+
+/*
+ * Boards that are already known to work with the RPM touch-rail vote and the
+ * performance boost keep them on; only ugg turns them off, because there the
+ * vote is what resets the SoC before the jump. See the comment next to
+ * BOARD_TOUCH_RAIL in the BOARD_UGG section.
+ */
+#ifndef BOARD_TOUCH_RAIL
+#define BOARD_TOUCH_RAIL	1
+#endif
+#ifndef BOARD_PERF_BOOST
+#define BOARD_PERF_BOOST	1
 #endif
