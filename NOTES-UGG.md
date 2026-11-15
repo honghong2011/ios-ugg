@@ -1,6 +1,111 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-15 10:00，第 19 轮）-- 自检图判定：几何修好了；真凶是看门狗
+## ★★★★★ 最新（2026-11-15 11:10，第 20 轮）-- 回到主线：全线 32bpp，重启是自杀不是看门狗
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`。上机手册 `TEST-GUIDE.md`。
+
+### 用户照片给出的两条**决定性**证据
+
+**证据一：重启是我们自己的代码干的，不是看门狗。**
+
+```
+PREVBOOT 0000000077665500
+```
+
+`0x77665500` 正是本项目 `reset()` 写进 IMEM 的 `RESTART_BOOTLOADER` 值。
+而同一屏上 `WDT EN=00000000` —— **看门狗根本没启用**。
+
+所以之前"看门狗咬的"这个判断**是错的**。真正的重启源是 `shim.c` 里
+`loader_boot()` 返回后的 `reset(20)`：它把原因打印到屏幕，然后 20 秒后重启，
+**正好在能拍照之前把证据抹掉**。这就是为什么每一轮都看不到结果。
+
+**已删除该 reset，改为停住等用户长按电源键。**
+
+**证据二：屏幕其实是好的。** 红底控制台所有诊断行都正常显示、
+eMMC/GPT/通道号全部可读 —— 说明 0x90000000 的像素上屏没问题。
+
+### 回到主线：照 mido 走 32bpp
+
+mido 的做法：
+
+```c
+#define FB_BASE   0x9c000000UL      /* ABL 留下 */
+#define FB_STRIDE (FB_W * 4)         /* a8r8g8b8 */
+volatile uint32_t *con_fb
+```
+
+**mido 的 shim 里完全没有任何 MDP 代码** —— 它直接用 ABL 留下的 32bpp framebuffer。
+
+我们之前退回 24bpp 是**错误的路线**，因为它让 XNU 走进死路：
+
+| 问题 | 代码位置 | 后果 |
+|---|---|---|
+| `vc_paint_char()` 只有 8/16/30/32，**没有 24** | `osfmk/console/video_console.c` | 内核文字**一个像素都不画** |
+| `fRowBytes < fWidth * 4` 直接 return false | `SweetFramebuffer.cpp:187` | **GUI 挂不上** |
+
+→ 所以 24bpp 下**永远不可能**出内核文字或 GUI。**必须 32bpp。**
+
+### 本轮改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `shim/board.h` | `FB_BPP` 3 → **4** |
+| `SWEET.h` | `UGG_FB_BPP 4`、`UGG_FB_STRIDE 2880` |
+| `sweet_early.c` | 回到单个 32 位写入，`EARLY_STRIDE = STRIDE/4` |
+| `shim/fb32.c` | **写 MDP RGB0 = 0x000236ff + unpack 0x03020001，然后回读验证** |
+| `shim/shim.c` | 切完后**重绘**；删掉 `reset(20)` 改成停住 |
+| `xnu/patches/0082` | 重新生成（3021 行，`git apply --check` 通过） |
+
+**为什么这次能判定成败**：以前"切换没生效"是**猜的**（没有回读）。
+现在写完后回读 `SRC_FORMAT`，读不回来就明确打印 `RGB0 SWITCH REFUSED`。
+
+### 新镜像（刷这个）
+
+```
+shim-boot-0082-mido.img  8,173,568 B
+sha256 8d3618e6712ebc9b4eac44f761d9de031ead54d7c02fbdd1615ca32f45dee1d7
+```
+
+```
+fastboot boot C:\\Users\\Administrator\\Desktop\\ios-ugg\\shim-boot-0082-mido.img
+```
+
+内核来自 CI run `43669073531`（`xnu` success，含 32bpp 改动），
+sha256 `294392ff88e6de7d751c986834b8470375bd71141458f24504c19b073b43c38e`。
+
+### 这次应该看到什么（关键变化）
+
+```
+BOOT WDT EN=00000000 -> 证明看门狗没装
+RGB0 ADDR=... FMT=0002243f ...      <- 切换前
+RGB0 FMT now=000236ff STRIDE now=00000b40   <- 切换后
+SHIM ugg loader, 32 bpp verified     <- 重绘后，这一屏全是 32bpp 画的
+INITRD / PHYS / ENTRY / SEGS
+JUMP / XNU jumping (fbcon clears screen)
+```
+
+**然后 XNU 的文字应该第一次能看清了**（因为 `v_depth=32` 现在落在
+`vc_paint_char()` 支持的 case 里）。
+
+| 看到 | 含义 |
+|---|---|
+| `RGB0 SWITCHED` 没出现，而是 `SWITCH REFUSED` | MDP 不接受该值，需另找方案 |
+| 切换成功 + 内核文字出现 | ✅ **主线的关键突破** |
+| 切换成功但屏幕花 | 32bpp 但通道序/stride 仍需调 |
+| 不再自动重启 | ✅ 自杀式 reset 已去掉 |
+
+### 已放弃/不再碰的
+
+- ❌ 看门狗（`WDT EN=0`，没装，不是元凶）—— 只保留一行诊断输出
+- ❌ 24bpp（XNU 根本画不出来）
+- ❌ 自检图（已删）
+
+---
+
+## ★★★★★ 上一轮（2026-11-15 09:30，第 19 轮）-- 看门狗排查（结论：不是它）
+
+> 本节结论已被第 20 轮用户照片推翻：`WDT EN=0`，看门狗从未启用。
+
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`。上机手册 `TEST-GUIDE.md`。
 
@@ -26,7 +131,7 @@ pitch=2160 完全正确，剪切彻底消失。**上一轮的 32bpp→24bpp 诊�
 屏上是 红→**蓝→绿**。面板实际是 BGR 顺序，而 `early_px()` / `con_put()` 写的是
 RGB 字节序。**这不影响读日志**（文字是白色，R=G=B），所以排在后面。
 
-**结论三（真凶）：手机自己重启 = APSS 看门狗咬的。** ⚠️
+**结论三（已被第 20 轮推翻）：当时归因为 APSS 看门狗。** ❌ 实拍 `WDT EN=00000000`，看门狗从未启用；真正的重启源是 `shim.c` 的 `reset(20)`。
 
 红屏是 shim 自己的 `con_clear(RED)`（`shim.c` 的 shim_main），
 说明 shim **已经跑到跳内核那一步**，然后固定时间后复位。
