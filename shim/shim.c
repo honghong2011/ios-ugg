@@ -113,18 +113,27 @@ static void delay_ms(unsigned ms)
 		;
 }
 
+/*
+ * HALT, never reboot.
+ *
+ * This function used to wait and then reset the SoC. That single behaviour has
+ * destroyed every diagnostic boot this project has had: the shim prints the
+ * reason it stopped -- a loader error, or a full exception dump with ESR /
+ * ELR / FAR -- and then reboots 20-40 seconds later, which is either before the
+ * phone can be picked up or right after a flash that leaves a blank screen. The
+ * user has seen "screen flashes and it reboots" four times now, and each time
+ * the reason was printed and thrown away.
+ *
+ * So it no longer resets. The panel keeps whatever was printed, forever, until
+ * the user holds Power. That turns every failure into readable evidence
+ * instead of a reboot, which is the only way the boot can make progress.
+ */
 static void __attribute__((noreturn)) reset(unsigned after_s)
 {
+	(void)after_s;
 	con_skip();
-	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
-	delay_ms(after_s * 1000);
-	/* Boards without the Qualcomm restart registers (QEMU) define these 0. */
-	if (IMEM_RESTART_REASON)
-		wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
+	con_str("HALTED", "reason above; hold POWER");
 	__asm__ volatile("dsb sy" ::: "memory");
-	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
-	if (PSHOLD_PHYS)
-		wr32(PSHOLD_PHYS, 0);
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -208,7 +217,18 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_hex("X0", regs[0]);
 	con_hex("X1", regs[1]);
 	con_hex("X30", regs[29]);	/* stashed lr is just above the frame */
-	reset(40);
+	/*
+	 * Persist the dump before halting.
+	 *
+	 * The panel is not always readable -- a 32 bpp mismatch shears it -- so
+	 * the one place a fault can reliably be recovered from is the console log
+	 * ring that gets written to the cache partition. Flush it here: this is
+	 * the single most valuable line in the whole boot when XNU dies early.
+	 */
+	con_str("PANIC", "frozen; hold POWER to reboot");
+	ugg_emmc_flush_log();
+	for (;;)
+		__asm__ volatile("wfe");
 }
 
 /* ---- SMP ---- */
@@ -466,28 +486,13 @@ void shim_main(uint64_t dtb)
 #endif
 	con_skip();
 
-	stage = "fb";
-	int fb32_ok = shim_fb_set_32bpp();
 	/*
-	 * Repaint after the switch.
-	 *
-	 * Everything drawn before the switch was written assuming the pipe was
-	 * already 32 bpp. If it was not, those lines are sheared -- they were
-	 * drawn at 2880 bytes per row into a 2160 byte row. Clearing now removes
-	 * them, so the screen a photograph catches shows only lines that were
-	 * drawn with the geometry the pipe is really using.
-	 *
-	 * When the switch is refused the clear is pointless (the console and the
-	 * pipe still disagree, so the wipe itself is sheared) but harmless: the
-	 * explicit message below is what carries the verdict either way.
+	 * Report the pipe, do not touch it. The console draws 24 bpp, which is the
+	 * format this panel scans, and two attempts at forcing 32 bpp produced a
+	 * sheared screen. See fb32.c.
 	 */
-	if (fb32_ok) {
-		con_clear(RED);
-		con_str("SHIM", BOARD_NAME " loader, 32 bpp verified");
-		con_skip();
-	} else {
-		con_str("FB", "32 bpp refused; screen will be wrong");
-	}
+	stage = "fb";
+	shim_fb_report();
 	con_skip();
 
 	stage = "wdt";

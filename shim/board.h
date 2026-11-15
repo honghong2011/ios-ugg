@@ -92,7 +92,7 @@
  * path. A frame is 720*4*1280 = 3.5 MiB, well inside the 20 MiB splash
  * carve-out, which is 2 MiB aligned, so the MMU mapping needs two blocks.
  */
-#define FB_BPP		4
+#define FB_BPP		3
 #define FB_SWAP_RB	0
 #define FB_SCALE	2
 
