@@ -55,6 +55,10 @@ CMDLINE="$CMDLINE sweetfb_noconsole=1 sweetfb_hz=30"
 # not resolvable in a photograph, which is how every boot result is read here.
 # ugg_vcscale=1 restores upstream geometry without a rebuild.
 CMDLINE="$CMDLINE ugg_vcscale=2"
+# EXTRA_CMDLINE lets one shim+kernel pair produce both a normal image and the
+# display selftest image (EXTRA_CMDLINE=ugg_fbtest=1), which holds the colour
+# bars on screen long enough to photograph.
+CMDLINE="$CMDLINE ${EXTRA_CMDLINE:-}"
 echo "=== payload"
 python $HERE2/tools/mkpayload.py "$KERNEL" $ROOT/build/img/ugg.adt \
     $ROOT/build/img/payload.bin --cmdline "$CMDLINE"

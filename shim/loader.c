@@ -13,6 +13,7 @@
 #include "loader.h"
 #include "mmu.h"
 #include "emmc.h"
+#include "fb32.h"
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
@@ -77,6 +78,22 @@ static void zero64(uintptr_t dst, uint64_t n)
 	volatile uint64_t *d = (volatile uint64_t *)dst;
 	for (uint64_t i = 0; i < n / 8; i++)
 		d[i] = 0;
+}
+
+/* Search the payload's command line for a flag, without libc. */
+static int
+cmdline_has(const char *cmd, const char *needle)
+{
+	for (int i = 0; i < BOOT_LINE_LENGTH && cmd[i]; i++) {
+		int k = 0;
+		while (needle[k] && i + k < BOOT_LINE_LENGTH && cmd[i + k] == needle[k]) {
+			k++;
+		}
+		if (!needle[k]) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static int magic_ok(const char *m)
@@ -150,12 +167,21 @@ const char *loader_boot(uintptr_t dtb)
 	ba->physBase = p->phys_base;
 	ba->memSize = p->mem_size;
 	ba->topOfKernelData = top;
+	/*
+	 * 32 bpp, 4 bytes per pixel, stride 720*4.
+	 *
+	 * The shim's own console above is 24 bpp and stays that way: it is proven
+	 * on this panel. But XNU must be told 32 bpp, because the pipe is switched
+	 * to BGRX8888 just before the jump (shim_fb_stage_32bpp), and because
+	 * SweetFramebuffer::start() refuses fRowBytes < fWidth * 4 -- at 24 bpp the
+	 * GUI can never attach. mido runs the same way on the same MDP5 family.
+	 */
 	ba->Video.v_baseAddr = FB_PHYS;
 	ba->Video.v_display = 1;
-	ba->Video.v_rowBytes = FB_STRIDE;
+	ba->Video.v_rowBytes = (uint64_t)FB_W * 4u;
 	ba->Video.v_width = FB_W;
 	ba->Video.v_height = FB_H;
-	ba->Video.v_depth = FB_BPP * 8;
+	ba->Video.v_depth = 32;
 	ba->deviceTreeP = adt_pa - pa_of_va_base;	/* xnu reads it with the MMU on: a VA */
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
@@ -249,23 +275,33 @@ const char *loader_boot(uintptr_t dtb)
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 
 	/*
-	 * Paint a distinctive bar into the framebuffer from the shim, then call
-	 * XNU. If the bar appears but XNU's stage-0 fill does not, execution
-	 * reached the call and died inside XNU; if the bar does not appear, the
-	 * shim never got this far.
+	 * Last shim step: hand the pipe over in the format XNU expects, show a
+	 * shape that can actually be photographed, then jump.
+	 *
+	 * Everything the shim printed above is 24 bpp, and it stays visible until
+	 * the flush because nothing changes on the panel before it. Register
+	 * read-backs are printed first for exactly that reason: they are readable
+	 * on the 24 bpp console even if the 32 bpp picture turns out wrong.
+	 *
+	 * Command line flag ugg_fbtest=1 holds the read-back and the bars long
+	 * enough to photograph both; a normal boot only flashes them briefly.
 	 */
 	{
-		volatile uint8_t *fb = (volatile uint8_t *)FB_PHYS;
-		for (int y = 0; y < 8; y++)
-			for (int x = 0; x < FB_W; x++) {
-				volatile uint8_t *p2 = fb + (uintptr_t)(FB_H - 16 + y) * FB_STRIDE
-				    + (uintptr_t)x * FB_BPP;
-#if FB_BPP == 4
-				*(volatile uint32_t *)p2 = 0xff00ffffu;
-#else
-				p2[0] = 0xff; p2[1] = 0x00; p2[2] = 0xff;
-#endif
+		int fbtest = cmdline_has(p->cmdline, "ugg_fbtest=1");
+		int ok32 = shim_fb_stage_32bpp();
+
+		con_str("RGB0 32BPP", ok32 ? "staged (registers read back)" : "REFUSED");
+		con_hex("VIDEO rowbytes", ba->Video.v_rowBytes);
+		con_hex("VIDEO depth", ba->Video.v_depth);
+		if (fbtest) {
+			/* give the read-back a chance to be photographed */
+			for (volatile uint64_t i = 0; i < 60000000ULL; i++) {
 			}
+		}
+
+		shim_fb_commit_32bpp();
+		shim_fb_bars32(fbtest ? 8000u : 1200u);
+		shim_fb_black32();
 	}
 	((xnu_entry_t)entry_pa)(ba_pa);
 

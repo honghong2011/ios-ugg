@@ -91,3 +91,164 @@ shim_fb_report(void)
 		con_putc('\n');
 	}
 }
+
+/* ------------------------------------------------------------------ *
+ * 32 bpp end to end
+ *
+ * The console above is 24 bpp and proven on the panel. XNU cannot stay
+ * there: SweetFramebuffer::start() rejects fRowBytes < fWidth * 4, so the
+ * GUI can never attach at 24 bpp, and upstream video_console has no 24 bpp
+ * painter at all (ours is custom code we would have to keep alive).
+ *
+ * mido, on the same MDP5 family, has run XNU at 32 bpp from the start and
+ * reached the home screen, so this follows its register sequence exactly,
+ * with this board's geometry substituted:
+ *
+ *   LK leaves RGB0 in BGR888 (3 B/px, SRC_FORMAT 0x0002243f) at stride
+ *   720*3. Switch it to BGRX8888 (0x000236ff), unpack B,G,R,X
+ *   (0x03020001), stride 720*4, and flush CTL0 bit 3 so the change is
+ *   latched at the next vsync.
+ *
+ * Staging and committing are separate on purpose: register writes are
+ * readable immediately but nothing changes on the panel until the flush,
+ * so the result can still be printed on the (24 bpp) console and read in a
+ * photograph before the screen is replaced.
+ * ------------------------------------------------------------------ */
+
+#define MDP_CTL0    (MDSS_BASE + 0x2000UL)
+#define CTL_FLUSH   0x18
+#define CTL_FLUSH_RGB0   (1u << 3)
+
+#define FMT_BGR888      0x0002243fu     /* LK's 24 bpp state (measured) */
+#define FMT_BGRX8888    0x000236ffu     /* 4 B/px, 4 components, 8 bpc, alpha off */
+#define UNPACK_BGRX     0x03020001u     /* memory order B, G, R, X */
+
+static void
+fb_delay_ms(uint32_t ms)
+{
+	uint64_t freq, t0, ticks;
+
+	if (ms == 0) {
+		return;
+	}
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+	__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t0));
+	ticks = (freq / 1000u) * (uint64_t)ms;
+	for (;;) {
+		uint64_t t1;
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t1));
+		if (t1 - t0 >= ticks) {
+			break;
+		}
+	}
+}
+
+/* Fill the whole 32 bpp frame with one word. Done before the switch latches. */
+static void
+fb_fill32(uint32_t word)
+{
+	volatile uint32_t *p = (volatile uint32_t *)FB_PHYS;
+
+	for (uint32_t i = 0; i < (uint32_t)FB_W * (uint32_t)FB_H; i++) {
+		p[i] = word;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/*
+ * Program the pipe for 32 bpp but do not latch it. Returns 1 when every
+ * register reads back what was written.
+ */
+int
+shim_fb_stage_32bpp(void)
+{
+	uint32_t before = md_rd(MDP_RGB0 + SSPP_SRC_FORMAT);
+	uint32_t stride = md_rd(MDP_RGB0 + SSPP_STRIDE_A);
+
+	/* Start from a black frame so the switch never shows stale 24 bpp bytes. */
+	fb_fill32(0x00000000u);
+
+	md_wr(MDP_RGB0 + SSPP_SRC_FORMAT, FMT_BGRX8888);
+	md_wr(MDP_RGB0 + SSPP_UNPACK, UNPACK_BGRX);
+	md_wr(MDP_RGB0 + SSPP_STRIDE_A, (uint32_t)FB_W * 4u);
+
+	con_puts("RGB0 FMT ");
+	con_hex(before, 8);
+	con_puts(" -> ");
+	con_hex(md_rd(MDP_RGB0 + SSPP_SRC_FORMAT), 8);
+	con_putc('\n');
+	con_puts("RGB0 STRIDE ");
+	con_hex(stride, 8);
+	con_puts(" -> ");
+	con_hex(md_rd(MDP_RGB0 + SSPP_STRIDE_A), 8);
+	con_putc('\n');
+	con_puts("RGB0 UNPACK -> ");
+	con_hex(md_rd(MDP_RGB0 + SSPP_UNPACK), 8);
+	con_putc('\n');
+
+	return md_rd(MDP_RGB0 + SSPP_SRC_FORMAT) == FMT_BGRX8888 &&
+	       md_rd(MDP_RGB0 + SSPP_UNPACK) == UNPACK_BGRX &&
+	       md_rd(MDP_RGB0 + SSPP_STRIDE_A) == (uint32_t)FB_W * 4u;
+}
+
+void
+shim_fb_commit_32bpp(void)
+{
+	md_wr(MDP_CTL0 + CTL_FLUSH, CTL_FLUSH_RGB0);
+	fb_delay_ms(50);        /* more than two frames at 60 Hz */
+}
+
+/*
+ * Six solid bars plus a one-pixel frame, drawn with 32-bit stores.
+ *
+ * This is the shape that answers "is the scan chain right?" in a single
+ * photograph: solid bars mean the format, the unpack order and the stride
+ * all agree with what is written; stripes, a missing frame or a frame that
+ * is not flush with the edges means they do not. Text cannot answer that,
+ * because an 8x16 font on a 720p panel is below what a camera resolves.
+ */
+void
+shim_fb_bars32(uint32_t hold_ms)
+{
+	static const uint32_t bar[6] = {
+		0x00ff0000u,     /* red   */
+		0x0000ff00u,     /* green */
+		0x000000ffu,     /* blue  */
+		0x00ffffffu,     /* white */
+		0x00808080u,     /* grey  */
+		0x00000000u      /* black */
+	};
+	volatile uint32_t *p = (volatile uint32_t *)FB_PHYS;
+	const uint32_t w = (uint32_t)FB_W;
+	const uint32_t h = (uint32_t)FB_H;
+	const uint32_t bw = w / 6u;
+
+	for (uint32_t y = 0; y < h; y++) {
+		for (uint32_t x = 0; x < w; x++) {
+			uint32_t i = x / bw;
+			if (i > 5u) {
+				i = 5u;
+			}
+			p[y * w + x] = bar[i];
+		}
+	}
+	/* Frame: proves the buffer is scanned with exactly FB_W x FB_H. */
+	for (uint32_t y = 0; y < h; y++) {
+		p[y * w + 0] = 0x00ffffffu;
+		p[y * w + (w - 1u)] = 0x00ffffffu;
+	}
+	for (uint32_t x = 0; x < w; x++) {
+		p[0 * w + x] = 0x00ffffffu;
+		p[(h - 1u) * w + x] = 0x00ffffffu;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	fb_delay_ms(hold_ms);
+}
+
+/* Blank the frame so XNU starts from a clean 32 bpp buffer. */
+void
+shim_fb_black32(void)
+{
+	fb_fill32(0x00000000u);
+}
+

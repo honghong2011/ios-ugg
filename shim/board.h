@@ -76,21 +76,28 @@
 #define FB_W		720
 #define FB_H		1280
 /*
- * 32 bpp, as on mido.
+ * FB_BPP is the SHIM console's pixel size, and it stays 3.
  *
- * The 24 bpp experiment is over. It was adopted because a photograph showed
- * the text sheared, which turned out to be a pitch mismatch, and 24 bpp fixed
- * the geometry -- but it put the board on a path XNU cannot finish:
+ * The panel scans whatever the MDP RGB0 pipe is programmed for, and LK leaves
+ * it in BGR888: 3 bytes per pixel, stride 720*3 = 2160. The shim's console is
+ * therefore byte-for-byte correct at 24 bpp, which is exactly what the red
+ * boot screen demonstrates on the hardware.
  *
- *   - osfmk/console/video_console.c paints only for v_depth 8, 16, 30 and 32,
- *     so a kernel told v_depth = 24 draws nothing at all, and
+ * XNU must NOT be given 24 bpp. Two independent reasons:
+ *
+ *   - upstream osfmk/console/video_console.c paints only for v_depth 8, 16,
+ *     30 and 32 and has no 24 bpp painter at all (ours is custom code), and
  *   - SweetFramebuffer::start() rejects fRowBytes < fWidth * 4, so the GUI
- *     path cannot attach either.
+ *     path can never attach at 24 bpp -- the desktop is unreachable there.
  *
- * mido runs 32 bpp end to end (its shim console is a uint32_t * with
- * FB_STRIDE = FB_W * 4) and reached the home screen that way. Take the same
- * path. A frame is 720*4*1280 = 3.5 MiB, well inside the 20 MiB splash
- * carve-out, which is 2 MiB aligned, so the MMU mapping needs two blocks.
+ * So the pipe is switched to BGRX8888 right before the jump
+ * (shim_fb_stage_32bpp() in fb32.c) and the boot_args tell XNU 32 bpp /
+ * rowBytes 720*4, which is what mido does on the same MDP5 family. The shim
+ * console itself keeps drawing 24 bpp and is simply not used after the
+ * switch: nothing prints between the switch and the jump.
+ *
+ * A 32 bpp frame is 720*4*1280 = 3.5 MiB, well inside the 20 MiB splash
+ * carve-out.
  */
 #define FB_BPP		3
 #define FB_SWAP_RB	0
