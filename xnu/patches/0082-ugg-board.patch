@@ -998,7 +998,7 @@ index 0000000..21840de
 +}
 +#endif /* UGG_BOARD */
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..6ccd7c2 100644
+index bb2a2bf..910d2f5 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -492,7 +492,9 @@ bsd_init(void)
@@ -1012,6 +1012,29 @@ index bb2a2bf..6ccd7c2 100644
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
  #else
  #define bsd_init_kprintf(x, ...)
+@@ -897,6 +899,22 @@ bsd_init(void)
+ 		}
+ #endif
+ 		printf("cannot mount root, errno = %d\n", err);
++#if defined(UGG_BOARD)
++		/*
++		 * UGG: the retry loop above re-runs the whole of setconf() and so
++		 * re-probes eMMC on every pass. The console scrolls faster than the
++		 * screen can be photographed, which meant the single line that matters
++		 * -- the errno -- was never once captured. Say it once, loudly, and
++		 * stop: a wrong root cannot be fixed by trying again, and looping for
++		 * minutes is what lets the boot-stage watchdog reset the phone.
++		 *
++		 * This is a bring-up build; once iOS is on userdata this branch is
++		 * never reached.
++		 */
++		printf("UGG ROOT FAIL: rootdevice=\"%s\" errno=%d args=\"%s\"\n",
++		    rootdevice, err, PE_boot_args());
++		panic("UGG: no root filesystem on %s (errno %d)", rootdevice, err);
++#endif
+ 	}
+ 
+ 	IOSecureBSDRoot(rootdevice);
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 68612db..576f70f 100644
 --- a/bsd/kern/kern_exec.c
