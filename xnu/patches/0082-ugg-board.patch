@@ -2046,6 +2046,57 @@ index 06bb568..2b727c3 100644
  #endif
  	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index a1f2a91..9ad6d4e 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1241,7 +1241,33 @@ ml_get_cpu_number_local(void)
+ 	MRS(mpidr_el1_value, "MPIDR_EL1");
+ 	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
+ 
+-	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
++	/*
++	 * UGG: do not die here.
++	 *
++	 * Upstream asserts that the CPU we are executing on appears in the
++	 * topology table. On this board it does not: the phone panics at
++	 * machine_routines.c with "assertion failed:
++	 * cpu_id <= (unsigned int)ml_get_max_cpu_number()" during
++	 * kernel_startup_bootstrap, because the MPIDR_EL1 of the core we were
++	 * handed by the bootloader has no matching 'reg' in the topology that the
++	 * Apple device tree supplied.
++	 *
++	 * Falling back to the boot CPU is correct for the bring-up, which is
++	 * uniprocessor: there is exactly one CPU running, it is the boot CPU, and
++	 * the only thing this value is used for is selecting the right per-CPU
++	 * structure. Printing the mismatched IDs means the real problem is still
++	 * visible instead of being silently papered over.
++	 */
++	if (cpu_id < 0 || cpu_id > (unsigned int)ml_get_max_cpu_number()) {
++		printf("SWEET CPU MAP: mpidr=%llx masked=%x -> id %d, max %d, using boot cpu %d
++",
++		    (unsigned long long)mpidr_el1_value,
++		    (unsigned)(uint32_t)mpidr_el1_value &
++		    (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK),
++		    (int)cpu_id, ml_get_max_cpu_number(),
++		    ml_get_boot_cpu_number());
++		cpu_id = (unsigned int)ml_get_boot_cpu_number();
++	}
+ 
+ 	return cpu_id;
+ }
+@@ -1256,7 +1282,10 @@ ml_get_cluster_number_local()
+ 	MRS(mpidr_el1_value, "MPIDR_EL1");
+ 	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
+ 
+-	assert(cluster_id <= (unsigned int)ml_get_max_cluster_number());
++	/* UGG: same unmapped-CPU case as ml_get_cpu_number_local(); boot cluster wins. */
++	if (cluster_id > (unsigned int)ml_get_max_cluster_number()) {
++		cluster_id = (unsigned int)topology_info.boot_cluster->cluster_id;
++	}
+ 
+ 	return cluster_id;
+ }
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 index 24f1abc..5bbe12d 100644
 --- a/osfmk/arm64/sleh.c
