@@ -75,7 +75,8 @@ if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) { ... }
 
 | 文件 | 内容 | sha256 |
 |---|---|---|
-| 内核 | 32bpp + 2 倍 vc + 32bpp sweet_early，CI `43699026717` | 编译中 |
+| 内核 | 32bpp + 2 倍 vc + 32bpp sweet_early，CI `43699026717` (success) | `fb8a3b22326406f8f59210c1f022b5135f0b00005cb2123ca48c38d0377ac7f2` |
+| **普通镜像** | 32bpp 端到端，等上机 | `shim-boot-0084-32bpp.img` = `514084e05f0d3390b3508b7efd5639bcdce906ba9313f5097fe190341b130629` |
 
 
 ## ★★★★★ （2026-11-15 16:50，第 28 轮）-- 走 mido 的路：切 32 bpp 端到端 + 色带自检
