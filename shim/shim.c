@@ -13,7 +13,7 @@
 #include "sdhc.h"
 #include "emmc.h"
 #include "fb32.h"
-#include "selftest.h"
+#include "wdt.h"
 #include "rpm.h"
 #include "perf.h"
 #include "input.h"
@@ -447,17 +447,25 @@ void shim_main(uint64_t dtb)
 	 */
 
 	/*
-	 * Proof-of-display before anything else. The panel is the only output this
-	 * phone has, so a photograph of a known colour pattern has to be enough to
-	 * say whether our writes and the panel scan-out agree on the pitch. Text
-	 * cannot do that: when the geometry is wrong the text is unreadable, which
-	 * is exactly the situation this is meant to diagnose.
+	 * The watchdog first, before anything slow.
 	 *
-	 * 12 s hold: long enough to pick up a camera, short enough that the pattern
-	 * is not mistaken for a hang.
+	 * LK arms the APSS watchdog and stops petting it. Nothing in this image or
+	 * in XNU pets it either, so a fixed number of seconds after the jump the
+	 * phone resets itself -- which is what has been wiping the boot between
+	 * "kernel printed something" and "log captured". Report it, then stop it.
+	 *
+	 * The colour self-test that used to run here has been removed: its photo
+	 * proved the 24 bpp geometry is right, and the hold was long enough to be
+	 * one of the things the watchdog was biting on.
 	 */
-	shim_display_selftest(12000);
-	
+	stage = "wdt";
+	shim_wdt_report("BOOT");
+	shim_wdt_disable();
+	con_skip();
+	con_str("RESETREASON", "see IMEM");
+	con_hex("PREVBOOT", shim_reset_reason());
+	con_skip();
+
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_log_init();
