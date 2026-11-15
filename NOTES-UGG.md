@@ -1,7 +1,90 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-15 16:25，第 27 轮）-- 屏幕参数已被代码证明无错；把内核控制台放大到 2 倍
 
-## ★★★★★ 最新（2026-11-15 15:40，第 26 轮）-- 内核在打印了！文字糊掉是滚动拷贝放大 4 倍
+### 不再用照片反推参数：参数链只有一处来源，逐行核对完毕
+
+| 位置 | 内容 |
+|---|---|
+| `shim/board.h` | `FB_PHYS 0x90000000` / `FB_W 720` / `FB_H 1280` / `FB_BPP 3` |
+| `shim/console.h` | `FB_STRIDE = FB_W * FB_BPP = 2160` |
+| `shim/loader.c` 153-158 | `ba->Video = {0x90000000, display 1, 2160, 720, 1280, 24}` |
+| `pexpert/arm/pe_init.c` 406-415 | 内核原样抄进 `PE_state.video`；`v_depth & 0xFF = 24`，`v_scale = ((v_depth >> 16) & 0xFF) + 1 = 1` |
+| `video_console.c` `initialize_screen` | `v_rowbytes = 2160`，`v_depth = 24` |
+| `video_console.c` `vc_initialize` | `v_rowscanbytes = ((24+7)/8)*720 = 2160`，与 `v_rowbytes` **相等** |
+
+结构体布局也对得上：`pexpert/pexpert/arm64/boot.h` 的 `Boot_Video` 就是
+`{v_baseAddr, v_display, v_rowBytes, v_width, v_height, v_depth}` 六个 64 位字段，
+和 `shim/loader.c` 里的 `struct boot_video` 逐字段一致（loader.c 用
+`_Static_assert(__builtin_offsetof(struct boot_args, Video) == 40)` 卡住偏移）。
+
+**链路上没有第二个来源，没有 mido 的 1080/2400/4320 混进来。**
+所以「屏幕参数没调好」这个方向 **已经排除**。
+
+### 那"花屏"到底是什么
+
+内核控制台的字符单元是 **8x16 像素**（`osfmk/console/iso_font.c:308`
+`#define ISO_CHAR_WIDTH 8` / `ISO_CHAR_HEIGHT 16`）。这个尺寸在 1080p/Retina 上
+是对的；在 720x1280 上，**每个笔画正好只有 1 个像素宽**。人眼看玻璃能看，
+但手机在这个距离拍"1 像素宽的细笔画"，采样比约 1:1，出来的就是摩尔纹 ——
+观感正是"花屏"。
+
+对照证据：shim 的控制台用 `FB_SCALE 2`（16x32 字符），**同样的面板、同样的
+24bpp、同样的 stride**，shim 的字拍照就是清楚的。尺寸才是差别，不是参数。
+
+### 真正的坏消息：它重启了
+
+红屏走完 -> 黑色跑码 -> 重启。重启说明内核在 boot 中途死了（panic，或被复位）。
+而屏幕上的字读不出来，就等于**没有日志**，后面每一步都是瞎猜。
+
+所以这一轮只做一件事：**把内核控制台放大到 2 倍**，让每一条内核消息、
+每一个 panic 都能被拍下来。这不是"套进控制台"，这是先把眼睛装回去。
+
+### 改动：`vc_cell_scale`（UGG 默认 2，可用引导参数覆盖）
+
+`osfmk/console/video_console.c` 新增：
+
+```c
+#if defined(SWEET) && defined(UGG)
+#define VC_CELL_SCALE_DEFAULT   2
+#else
+#define VC_CELL_SCALE_DEFAULT   1
+#endif
+static int vc_cell_scale = VC_CELL_SCALE_DEFAULT;
+#define VC_CELL_W       (ISO_CHAR_WIDTH * vc_cell_scale)
+#define VC_CELL_H       (ISO_CHAR_HEIGHT * vc_cell_scale)
+```
+
+**不是新开一条显示路径**：原来每一个乘 `ISO_CHAR_WIDTH/HEIGHT` 的几何点，
+现在乘 `VC_CELL_W/VC_CELL_H`；24bpp 画笔把每个字模像素写成
+`vc_cell_scale x vc_cell_scale` 个屏幕像素。改的点一共六处：
+
+| 函数 | 改了什么 |
+|---|---|
+| `vc_initialize` | `v_rows = v_height / VC_CELL_H`（40），`v_columns = v_width / VC_CELL_W`（45）；`PE_parse_boot_argn("ugg_vcscale")` 覆盖 1..8 |
+| `vc_clear_screen` | `linelongs = (v_rowbytes >> 2) * VC_CELL_H`（字单位） |
+| `vc_reverse_cursor` | 偏移用 `VC_CELL_W`，行数用 `VC_CELL_H`，24bpp 反色字节数 `VC_CELL_W*3` |
+| `vc_scroll_up/down` | `linelongs = v_rowbytes * VC_CELL_H`，内层行循环 `VC_CELL_H` |
+| `vc_paint_char_24` | 每个字模位展开成 scale×scale 块 |
+
+8/16/32bpp 三个老函数没动（本板不走）。`ugg_vcscale=1` 回到上游几何，
+**不用重新编译就能对比**（只改 `make-image.sh` 的 CMDLINE）。
+
+### 校验
+
+- `video_console.c` 花括号净差 = 0，`vc_paint_char_24` 唯一
+- 补丁重新生成：3680 行 / 123838 字节 / 32 个文件 / CR = 0
+- `GIT_INDEX_FILE=... git read-tree 2bbcef0; git apply --cached --check` -> 退出码 0
+
+### 下一张照片要看的三件事
+
+1. 内核文字**是否清楚到能逐行读**（如果是 -> "花屏"就是字号问题，结案）
+2. 最后停在哪个 kext / 哪一行，以及 **panic 的完整内容**
+3. 重启前的**最后 5 行** —— 大概率是找不到根文件系统
+   （userdata 上还是 Android，`rd=ufsroot0` 找不到就 panic）
+
+
+## ★★★★★ （2026-11-15 15:40，第 26 轮）-- 内核在打印了！文字糊掉是滚动拷贝放大 4 倍
 
 ### 实机结果：两行 CPU MAP 没出现 = CPU 这关过了
 

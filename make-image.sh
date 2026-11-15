@@ -50,6 +50,11 @@ CMDLINE="$CMDLINE wdt_test=no_user_checkin wdt=-1 launchd_unsecure_cache=1"
 # 30 Hz, not 60: mido A/B-tested it -- at 60 apps start but never appear,
 # at 30 they open (the panel copy starves the CPU). See PORTING_LOG 981.
 CMDLINE="$CMDLINE sweetfb_noconsole=1 sweetfb_hz=30"
+# Draw the kernel console at 2x (16x32 cells, 45x40). The upstream cell is
+# 8x16, i.e. one-pixel strokes on this 720p panel: legible on the glass, but
+# not resolvable in a photograph, which is how every boot result is read here.
+# ugg_vcscale=1 restores upstream geometry without a rebuild.
+CMDLINE="$CMDLINE ugg_vcscale=2"
 echo "=== payload"
 python $HERE2/tools/mkpayload.py "$KERNEL" $ROOT/build/img/ugg.adt \
     $ROOT/build/img/payload.bin --cmdline "$CMDLINE"
