@@ -467,14 +467,26 @@ void shim_main(uint64_t dtb)
 	con_skip();
 
 	stage = "fb";
-	if (!shim_fb_set_32bpp()) {
-		/*
-		 * The pipe refused. Keep going -- the boot may still be useful --
-		 * but the screen will be sheared or blank, and the photograph has
-		 * to be read as "hardware refused 32 bpp" rather than as a new
-		 * fault.
-		 */
-		con_str("FB", "32 bpp unavailable, expect a wrong screen");
+	int fb32_ok = shim_fb_set_32bpp();
+	/*
+	 * Repaint after the switch.
+	 *
+	 * Everything drawn before the switch was written assuming the pipe was
+	 * already 32 bpp. If it was not, those lines are sheared -- they were
+	 * drawn at 2880 bytes per row into a 2160 byte row. Clearing now removes
+	 * them, so the screen a photograph catches shows only lines that were
+	 * drawn with the geometry the pipe is really using.
+	 *
+	 * When the switch is refused the clear is pointless (the console and the
+	 * pipe still disagree, so the wipe itself is sheared) but harmless: the
+	 * explicit message below is what carries the verdict either way.
+	 */
+	if (fb32_ok) {
+		con_clear(RED);
+		con_str("SHIM", BOARD_NAME " loader, 32 bpp verified");
+		con_skip();
+	} else {
+		con_str("FB", "32 bpp refused; screen will be wrong");
 	}
 	con_skip();
 

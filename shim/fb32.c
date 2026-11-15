@@ -105,6 +105,11 @@ shim_fb_set_32bpp(void)
 	con_hex(str2, 8);
 	con_putc('\n');
 
+	/*
+	 * The caller repaints after a successful switch, so a success message
+	 * printed here would be wiped. Print only the failure path, which the
+	 * caller does not repaint.
+	 */
 	if (fmt2 != SRC_FORMAT_32BPP) {
 		con_puts("RGB0 SWITCH REFUSED: pipe is not 32 bpp\n");
 		return 0;
@@ -113,7 +118,6 @@ shim_fb_set_32bpp(void)
 		con_puts("RGB0 STRIDE REFUSED\n");
 		return 0;
 	}
-	con_puts("RGB0 SWITCHED to 32 bpp\n");
 	return 1;
 }
 
