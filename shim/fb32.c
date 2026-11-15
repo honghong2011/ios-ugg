@@ -17,6 +17,7 @@
  */
 #include <stdint.h>
 #include "console.h"
+#include "mido_compat.h"
 #include "board.h"
 #include "fb32.h"
 
