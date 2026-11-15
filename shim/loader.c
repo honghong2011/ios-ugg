@@ -96,6 +96,27 @@ cmdline_has(const char *cmd, const char *needle)
 	return 0;
 }
 
+/* Busy-wait on the architected counter; the shim has no timers yet. */
+static void
+loader_delay_ms(uint32_t ms)
+{
+	uint64_t freq, t0, ticks;
+
+	if (ms == 0) {
+		return;
+	}
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+	__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t0));
+	ticks = (freq / 1000u) * (uint64_t)ms;
+	for (;;) {
+		uint64_t t1;
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t1));
+		if (t1 - t0 >= ticks) {
+			break;
+		}
+	}
+}
+
 static int magic_ok(const char *m)
 {
 	static const char want[] = "SWEETXNU";
@@ -272,6 +293,15 @@ const char *loader_boot(uintptr_t dtb)
 	}
 #endif
 
+	/*
+	 * The one-shot armed above fires about a second from now, and everything
+	 * below holds the screen for seconds (the colour-bar selftest holds it
+	 * indefinitely). Disarm it here and re-arm it immediately before the jump,
+	 * so the watchdog still guards XNU's entry and nothing else.
+	 */
+	wsr("cntv_ctl_el0", 0);
+	__asm__ volatile("isb" ::: "memory");
+
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 
 	/*
@@ -293,16 +323,31 @@ const char *loader_boot(uintptr_t dtb)
 		con_str("RGB0 32BPP", ok32 ? "staged (registers read back)" : "REFUSED");
 		con_hex("VIDEO rowbytes", ba->Video.v_rowBytes);
 		con_hex("VIDEO depth", ba->Video.v_depth);
-		if (fbtest) {
-			/* give the read-back a chance to be photographed */
-			for (volatile uint64_t i = 0; i < 60000000ULL; i++) {
-			}
-		}
+		/* give the read-back a chance to be photographed */
+		loader_delay_ms(fbtest ? 6000u : 0u);
 
 		shim_fb_commit_32bpp();
-		shim_fb_bars32(fbtest ? 8000u : 1200u);
+		shim_fb_bars32(fbtest ? 3000u : 1200u);
+		if (fbtest) {
+			/*
+			 * Hold the bars forever: this boot exists only to photograph
+			 * them. A colour bar either survives the scan chain or it does
+			 * not, and that answer needs no kernel.
+			 */
+			for (;;) {
+				__asm__ volatile("wfi");
+			}
+		}
 		shim_fb_black32();
 	}
+
+	/* Re-arm the one-shot watchdog as the last thing before hand-off. */
+#if GIC_IS_V2
+	wsr("cntv_tval_el0", (uint64_t)(uint32_t)rsr("cntfrq_el0"));
+	wsr("cntv_ctl_el0", 1);
+	__asm__ volatile("isb" ::: "memory");
+#endif
+
 	((xnu_entry_t)entry_pa)(ba_pa);
 
 	/*
