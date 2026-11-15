@@ -11,10 +11,10 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..266e24a 100644
+index 6b926fe..f203486 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -117,6 +117,348 @@ static struct {
+@@ -117,6 +117,360 @@ static struct {
  static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
  static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
  
@@ -353,6 +353,18 @@ index 6b926fe..266e24a 100644
 +		}
 +		su.first_block = first / UGG_SPB;
 +		su.nblocks = (last - first + 1) / UGG_SPB;
++		/*
++		 * Print on SUCCESS too.
++		 *
++		 * This used to report only failures, so a boot that found the
++		 * partition looked exactly like one that never read the GPT: no
++		 * line at all. The next failure -- a mount against the wrong
++		 * extent -- was then indistinguishable from a missing device.
++		 * first/nblocks are in 4 KiB blocks, which is what su uses.
++		 */
++		printf("UGG EMMC: %s first=%llu nblocks=%llu (%llu MiB)\n",
++		    want, su.first_block, su.nblocks,
++		    (su.nblocks * UGG_SPB) / 2048ull);
 +		return 0;
 +	}
 +	printf("UGG EMMC: no GPT partition named \"%s\"\n", want);
@@ -363,7 +375,7 @@ index 6b926fe..266e24a 100644
  static inline uint32_t
  ufs_rd(uint32_t off)
  {
-@@ -129,13 +471,13 @@ ufs_wr(uint32_t off, uint32_t v)
+@@ -129,13 +483,13 @@ ufs_wr(uint32_t off, uint32_t v)
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
@@ -379,7 +391,7 @@ index 6b926fe..266e24a 100644
  dma_clean(uint32_t off, uint32_t len)
  {
  	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -145,7 +487,7 @@ dma_clean(uint32_t off, uint32_t len)
+@@ -145,7 +499,7 @@ dma_clean(uint32_t off, uint32_t len)
   * One SCSI command in slot 0, data (if any) to/from the bounce buffer
   * (to the device when write is set). Returns 0 or an errno.
   */
@@ -388,7 +400,7 @@ index 6b926fe..266e24a 100644
  ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  {
  	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
-@@ -260,6 +602,9 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+@@ -260,6 +614,9 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  static int
  ufs_read_blocks(uint64_t lba, uint32_t count)
  {
@@ -398,7 +410,7 @@ index 6b926fe..266e24a 100644
  	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
  		return EINVAL;
  	}
-@@ -269,6 +614,7 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
+@@ -269,6 +626,7 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
  		0, (uint8_t)(count >> 8), (uint8_t)count, 0
  	};
  	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
@@ -406,7 +418,7 @@ index 6b926fe..266e24a 100644
  }
  
  /*
-@@ -284,24 +630,35 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
+@@ -284,24 +642,35 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
  		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
  		return EPERM;
  	}
@@ -442,7 +454,7 @@ index 6b926fe..266e24a 100644
  	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
  	int error = ufs_read_blocks(1, 1);
  	if (error) {
-@@ -351,11 +708,15 @@ ufs_find_partition(const char *want)
+@@ -351,11 +720,15 @@ ufs_find_partition(const char *want)
  	}
  	printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
  	return ENOENT;
@@ -458,7 +470,7 @@ index 6b926fe..266e24a 100644
  	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
  	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
-@@ -385,6 +746,7 @@ ufs_take_over_host(void)
+@@ -385,6 +758,7 @@ ufs_take_over_host(void)
  		return EIO;
  	}
  	return 0;
@@ -466,7 +478,7 @@ index 6b926fe..266e24a 100644
  }
  
  static int
-@@ -592,9 +954,16 @@ sweet_ufs_init(void)
+@@ -592,9 +966,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -483,7 +495,7 @@ index 6b926fe..266e24a 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -607,7 +976,11 @@ sweet_ufs_init(void)
+@@ -607,7 +988,11 @@ sweet_ufs_init(void)
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
  
@@ -495,7 +507,7 @@ index 6b926fe..266e24a 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +996,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1008,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -510,7 +522,7 @@ index 6b926fe..266e24a 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -657,9 +1032,17 @@ sweet_ufs_init(void)
+@@ -657,9 +1044,17 @@ sweet_ufs_init(void)
  	sweet_log_start();
  	sweet_sample_start();
  	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
