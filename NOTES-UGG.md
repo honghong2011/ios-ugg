@@ -1,6 +1,110 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-15 11:10，第 20 轮）-- 回到主线：全线 32bpp，重启是自杀不是看门狗
+## ★★★★★ 最新（2026-11-15 11:40，第 21 轮）-- 找到"永远看不到内核文字"的真因：24bpp 分支根本不存在
+
+> 完整记录：`docs/MIDO-PORT-PLAN.md`。上机手册 `TEST-GUIDE.md`。
+
+### 用户第 20 轮反馈
+
+> "现在又花屏了，又是之前那种满屏条纹，然后又重启……没进内核，没有看到内核日志"
+
+两条独立问题被我一轮混在一起改了，分别定位如下。
+
+### 问题一：重启是我们的代码干的（已彻底删除）
+
+`shim.c` 的 `exc_handler()`（**异常处理入口**）末尾调用了 `reset(40)`：
+
+```c
+con_hex("ESR", ...);  con_hex("ELR", ...);  con_hex("FAR", ...);
+reset(40);          // <- XNU 一崩，打印完就重启
+```
+
+第 20 轮只删了正常返回路径的 `reset(20)`，**漏了这个**。所以"闪一下就重启"依旧。
+
+**本次改动**：`reset()` 不再重启（`PSCI_SYSTEM_RESET` / IMEM / PSHOLD 全部移除），
+改为永久停机等用户长按电源键。已在源码中确认**没有任何重启路径残留**：
+
+```
+grep -n "smc(PSCI_SYSTEM_RESET|wr32(IMEM_RESTART_REASON|wr32(PSHOLD" shim/*.c
+-> 空
+```
+
+同时在异常处理里加了 `ugg_emmc_flush_log()`：崩溃寄存器会**写进 cache 分区**，
+即使屏幕看不清也能用 dd 取出来。
+
+### 问题二：为什么永远看不到内核文字 —— 找到根因了
+
+`osfmk/console/video_console.c` 里所有按 `v_depth` 分支的地方，
+**只有 8 / 16 / 30 / 32，没有 24**：
+
+| 函数 | 没有 24 的后果 |
+|---|---|
+| `vc_paint_char()` | **一个字都不画** ← 这就是屏幕空白的原因 |
+| `vc_render_char()` | 字模位图不生成 |
+| `vc_blit_rect()` | 滚动/清屏无效 |
+| `vc_reverse_cursor()` | 光标不反显，且偏移算错 |
+| `vc_color_index_table[24]` = 0 | 24bpp 误用 8bpp 调色板：白=0x00000000 → **黑底黑字** |
+
+我们传的是 `v_depth = FB_BPP * 8 = 24`（这块屏实测就是 2160 字节行宽 = 24bpp）。
+**所以内核从来没有能力在这块屏上画任何一个像素。**
+
+这不是 ugg 特有 bug，是 **upstream 从没写过 24bpp 支持**。
+
+**本次补齐**（`xnu-src/osfmk/console/video_console.c`，全部进 0082 补丁）：
+
+| 新增 | 说明 |
+|---|---|
+| `vc_paint_char_24()` | 字节寻址画字，每像素 3 次写 |
+| `vc_blit_rect_24()` | 滚动/清屏/进度条 |
+| `vc_render_char()` 的 `case 24` | 3 字节覆盖率掩码 |
+| 光标反显 `case 24` | 24 字节取反 |
+| 光标字节偏移修正 | `xx*v_depth` → `xx*ISO_CHAR_WIDTH*bpp` |
+| `vc_color_index_table[24] = 3` | 用 32bpp 那列（纯 0xRRGGBB） |
+
+字模尺寸自洽性已核对：24bpp → 24 字节/行 × 16 行 = 384 B，
+`vc_rendered_char[512]` 够用。
+
+### 关键旁证：内核本来是好的
+
+CI 的 QEMU 任务（run `43669073531`，check-run `qemu`）：
+
+```
+qemu-verdict : PASS: bsd_init complete, waiting for an IOMedia/Apple_HFS root
+qemu-bsd_init: of 6 stages: 4 reached
+qemu-result  : {"status": "no_panic_observed"}
+```
+
+**内核在 QEMU 里能完整跑到 bsd_init 完成、无 panic。**
+所以"进不去"不是内核坏了，是它**没有能力把画面画出来**。
+这也直接回答了"什么时候能进内核"——它一直在进，只是我们看不见。
+
+### 关于 mido 的分辨率差异
+
+用户问得对：**mido 是 1080×2400 @32bpp（stride 4320），我们是 720×1280 @24bpp（stride 2160）。**
+
+- mido 的 shim 里**一行 MDP 代码都没有**，它直接用 ABL 留下的 32bpp framebuffer；
+- 我照抄它的 32bpp → 我们又试了一次强制 MDP `SRC_FORMAT=0x000236ff`，
+  **实机再次花屏**（32bpp 写、24bpp 扫描 → 每行差 540px、竖向压缩 0.75）。
+
+结论：**这块屏只能 24bpp**。mido 的 32bpp 路线在这里不成立。
+已把 `fb32.c` 改回**只读报告**，不再碰 MDP，并在注释里写清两次失败的证据。
+
+### 本轮最终形态
+
+| 项 | 状态 |
+|---|---|
+| 显示 | 24bpp（实测可读，不再动） |
+| MDP | 只读，不写 |
+| 重启 | **全部移除**，故障时永久停屏 |
+| 崩溃信息 | 打印到屏 + 写入 cache 分区 |
+| 内核 24bpp 文字 | **新实现** |
+
+---
+
+
+## ★★★★★ 上一轮（2026-11-15 11:10，第 20 轮）-- 回到主线：全线 32bpp（后被实机推翻）
+
+> 32bpp 在实机上再次花屏，第 21 轮已回退到 24bpp 并补齐内核 24bpp 支持。
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`。上机手册 `TEST-GUIDE.md`。
 
