@@ -89,6 +89,41 @@ qemu-result  : {"status": "no_panic_observed"}
 结论：**这块屏只能 24bpp**。mido 的 32bpp 路线在这里不成立。
 已把 `fb32.c` 改回**只读报告**，不再碰 MDP，并在注释里写清两次失败的证据。
 
+
+### 补丁生成的两个坑（已修）
+
+1. **`vc_blit_rect_24` 放错位置** —— 首次编译失败：
+   ```
+   error: call to undeclared function 'vc_blit_rect_24'
+   error: static declaration follows non-static
+   ```
+   新函数被追加到调用点之后。已移到前向声明块之前。
+
+2. **编辑器把整文件写成 CRLF** —— 3492 行全带 CR，
+   补丁从 198 行膨胀到 6794 行。已归一化回 LF，
+   并确认其余 28 个文件都干净。
+
+### 本轮产物
+
+```
+shim-boot-0082-mido.img  8,173,568 B
+sha256 a9821494b63ddc3f7e00fd59b0644f46a7a8862a455dedabed3568be7f8020c9
+```
+
+内核 CI run `43673847688`（success），17,139,912 B，
+sha256 `f8617484e44d40774ca071c21b68812585aeaed48ef75bf024f8633a87f286f0`。
+
+已核实：shim 含 `frozen; hold POWER`、无 `selftest`、含 `24bpp matches`；
+payload 含 `bsd_init` 与 `/product`。
+
+### 下载问题（重要，接手必读）
+
+artifact 下载在本机反复 `unexpected EOF`（61 MB 需 12 次断点续传）。
+**必须走本机代理 `http://127.0.0.1:7890`**。
+
+另外：MSYS 的 `/tmp` 实际是 `C:/Users/<user>/AppData/Local/Temp/2`，
+Python 看不到 `/tmp/xxx`，要先 cp 到工作区再处理。
+
 ### 本轮最终形态
 
 | 项 | 状态 |
