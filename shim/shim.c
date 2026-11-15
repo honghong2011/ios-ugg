@@ -439,12 +439,12 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 
 	/*
-	 * Before anything is drawn: LK leaves the RGB0 pipe in 24 bpp, while
-	 * this console and the XNU framebuffer driver both write 32-bit pixels
-	 * (UGG_FB_STRIDE is 720*4). Without the switch every scanline is read at
-	 * the wrong stride and the screen is diagonal garbage.
+	 * Everything here writes 24 bpp, which is what LK leaves in RGB0: the
+	 * earlier 32 bpp switch did not take effect on this panel and made every
+	 * scanline shear, including the shim console that was supposed to report it.
+	 * The registers are still read out, because ADDR/FMT/STRIDE are the first
+	 * thing to look at when the screen is wrong.
 	 */
-	int fb32 = shim_fb_to_32bpp();
 
 	/*
 	 * Proof-of-display before anything else. The panel is the only output this
@@ -493,23 +493,12 @@ void shim_main(uint64_t dtb)
 	con_skip();
 
 	/*
-	 * Refuse to boot XNU on a framebuffer we could not switch to 32 bpp.
-	 * mido gates its jump the same way ("XNU needs the 32 bpp framebuffer;
-	 * never boot it on LK's 24 bpp"). If the pipe is in an unknown state the
-	 * kernel would render into a 24 bpp scan-out: the screen becomes
-	 * unreadable and there is no way to tell a display fault from a kernel
-	 * fault. Stopping here keeps the shim's own output readable, which is
-	 * the whole reason for flashing a small image first.
+	 * Read the pipe out last, next to the other bring-up output, so one photo
+	 * has the display geometry and the storage state together.
 	 */
-	if (fb32 != 0) {
-		con_str("FB32", "FAILED: not booting XNU (see MDP line above)");
-		con_skip();
-		con_str("HOLD", "POWER to reboot");
-		for (;;) {
-			__asm__ volatile("wfe");
-		}
-	}
-	
+	shim_fb_report();
+	con_skip();
+
 	stage = "loader";
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
