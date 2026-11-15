@@ -458,15 +458,12 @@ void shim_main(uint64_t dtb)
 	 * proved the 24 bpp geometry is right, and the hold was long enough to be
 	 * one of the things the watchdog was biting on.
 	 */
-	stage = "wdt";
-	shim_wdt_report("BOOT");
-	shim_wdt_disable();
-	con_skip();
-	con_str("RESETREASON", "see IMEM");
-	con_hex("PREVBOOT", shim_reset_reason());
-	con_skip();
-
-	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
+	/*
+	 * Start the console first this time. The red field the user photographed
+	 * just before the reboot is this con_clear(RED): it means the shim did get
+	 * this far. Reporting the watchdog before the clear would throw that report
+	 * away, which is how the previous boot lost it.
+	 */
 	stage = "loader";
 	con_log_init();
 	con_clear(RED);
@@ -475,6 +472,12 @@ void shim_main(uint64_t dtb)
 #else
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 #endif
+	con_skip();
+
+	stage = "wdt";
+	shim_wdt_report("BOOT");
+	shim_wdt_disable();
+	con_hex("PREVBOOT", shim_reset_reason());
 	con_skip();
 
 	/*
