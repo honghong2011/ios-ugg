@@ -110,6 +110,57 @@ void con_clear(uint32_t bg)
 	row = 0;
 }
 
+
+/*
+ * Scroll the text area up by one row.
+ *
+ * Without this the console silently stops drawing: put_char_in() returns as
+ * soon as the glyph would fall past FB_H, but 'row' keeps incrementing, so
+ * every subsequent line is dropped. That is why a boot could print 36 lines of
+ * eMMC detail and then show nothing at all -- not even 'XNU jumping', let alone
+ * kernel text. The transfer below is byte-granular because the panel is 24 bpp
+ * and a row is 2160 bytes, which is not a multiple of a 32-bit word.
+ */
+static void con_scroll(void)
+{
+	uintptr_t shift = (uintptr_t)CH_H * FB_STRIDE;
+	uintptr_t total = (uintptr_t)FB_H * FB_STRIDE;
+
+	for (int f = 0; f < FB_FRAMES; f++) {
+		volatile uint8_t *base = (volatile uint8_t *)con_fb + (uintptr_t)f * FB_FRAME_BYTES;
+		/*
+		 * 8-byte chunks where the geometry allows it (2160*32 is a multiple
+		 * of 16, and the base is page aligned), bytes otherwise.
+		 */
+		if ((shift % 8u) == 0u && (total % 8u) == 0u) {
+			volatile uint64_t *d = (volatile uint64_t *)base;
+			uintptr_t n = (total - shift) / 8u;
+			for (uintptr_t i = 0; i < n; i++) {
+				d[i] = d[i + shift / 8u];
+			}
+		} else {
+			for (uintptr_t i = 0; i + shift < total; i++) {
+				base[i] = base[i + shift];
+			}
+		}
+		/* Clear the row that just scrolled into view. */
+		for (uintptr_t i = total - shift; i < total; i++) {
+			base[i] = (uint8_t)(con_bg & 0xff);
+		}
+	}
+}
+
+/* Keep 'row' inside the drawable area, scrolling when it would leave it. */
+static void con_ensure_row(void)
+{
+	int rows = (FB_H - MARGIN) / CH_H;
+	if (row < rows) {
+		return;
+	}
+	con_scroll();
+	row = rows - 1;
+}
+
 /*
  * Draw one character into one frame. `base` is the frame's start; frame 0 is
  * con_fb itself.
@@ -150,6 +201,7 @@ static void put_char_in(volatile uint8_t *base, int col, char ch, uint32_t fg)
 /* Every glyph is drawn into all frames, so whichever one scans out shows it. */
 static void put_char(int col, char ch, uint32_t fg)
 {
+	con_ensure_row();
 	con_log_putc(ch);
 	for (int f = 0; f < FB_FRAMES; f++)
 		put_char_in((volatile uint8_t *)con_fb + (uintptr_t)f * FB_FRAME_BYTES,

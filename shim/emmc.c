@@ -57,6 +57,7 @@ gpt_walk(void)
 	con_puts("GPT ENTRIES=");
 	con_dec(n);
 	con_putc('\n');
+	uint32_t used = 0;
 	for (uint32_t i = 0; i < n; i++) {
 		if (i % 4 == 0 && sdhc_read(ent_lba + i / 4, blk)) {
 			con_puts("GPT READ E\n");
@@ -70,25 +71,41 @@ gpt_walk(void)
 		}
 		uint64_t first = (uint64_t)ent[8] | ((uint64_t)ent[9] << 32);
 		uint64_t last = (uint64_t)ent[10] | ((uint64_t)ent[11] << 32);
-		con_puts("#");
-		con_dec(i + 1);
-		con_puts(" F=");
-		con_dec(first);
-		con_puts(" N=");
-		con_dec(last - first + 1);
+		used++;
+		/*
+		 * Only the partitions the boot cares about are printed.
+		 *
+		 * A full dump listed all 48 entries, which scrolled the panel so far
+		 * that the interesting lines (INITRD, JUMP, XNU jumping) had already
+		 * left the screen by the time a photograph could be taken. The
+		 * addresses are still recovered for the ones that matter, and the
+		 * count keeps the rest observable.
+		 */
 		if (name_eq(ent, "cache")) {
-			con_puts(" cache");
-			if (cache_first == 0) {
-				cache_first = first;
-				cache_sectors = last - first + 1;
-			}
+			cache_first = first;
+			cache_sectors = last - first + 1;
+			con_puts("GPT cache  F=");
+			con_dec(first);
+			con_puts(" N=");
+			con_dec(last - first + 1);
+			con_putc('\n');
 		} else if (name_eq(ent, "userdata")) {
-			con_puts(" userdata");
+			con_puts("GPT userdat F=");
+			con_dec(first);
+			con_puts(" N=");
+			con_dec(last - first + 1);
+			con_putc('\n');
 		} else if (name_eq(ent, "boot")) {
-			con_puts(" boot");
+			con_puts("GPT boot   F=");
+			con_dec(first);
+			con_puts(" N=");
+			con_dec(last - first + 1);
+			con_putc('\n');
 		}
-		con_putc('\n');
 	}
+	con_puts("GPT used=");
+	con_dec(used);
+	con_putc('\n');
 	if (cache_first == 0) {
 		con_puts("NO CACHE PARTITION, WRITES OFF\n");
 		return;

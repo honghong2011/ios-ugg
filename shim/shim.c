@@ -459,23 +459,19 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 
 	/*
-	 * ORDER MATTERS, and it is not the obvious one.
+	 * Point the pipe at our frame BEFORE the first pixel.
 	 *
-	 * The console below writes 32 bpp. The panel only agrees with that once
-	 * RGB0 has been switched, so the switch has to happen BEFORE the first
-	 * pixel is drawn -- but con_clear() needs the console, and the console
-	 * output is what tells us whether the switch worked. Resolve it by
-	 * clearing in the colour the pipe may or may not honour (it is a full
-	 * frame either way, so a wrong-format clear looks red and nothing is
-	 * lost), then switching, then drawing the report. Every line after the
-	 * switch is drawn with the geometry that is now actually in the pipe.
+	 * The photograph of the last console showed RGB0 ADDR=90001000 while the
+	 * shim drew at 0x90000000: 4096 bytes off, i.e. 1365 pixels per row, so
+	 * every line on screen was the tail of one console row followed by the
+	 * head of the next. That is the odd left-margin debris in the picture.
 	 *
-	 * The watchdog is reported here rather than first: PREVBOOT in the last
-	 * photograph read 0x77665500, which is this project's own
-	 * RESTART_BOOTLOADER, so the reset came from reset() below and not from
-	 * the watchdog (WDT EN read 0). It is kept because it is one line and it
-	 * settles the question for good.
+	 * This must run before con_clear(), because the clear is the first thing
+	 * that paints and it would otherwise land 4096 bytes away from where the
+	 * panel reads.
 	 */
+	shim_fb_claim();
+
 	stage = "loader";
 	con_log_init();
 	con_clear(RED);
@@ -487,9 +483,10 @@ void shim_main(uint64_t dtb)
 	con_skip();
 
 	/*
-	 * Report the pipe, do not touch it. The console draws 24 bpp, which is the
-	 * format this panel scans, and two attempts at forcing 32 bpp produced a
-	 * sheared screen. See fb32.c.
+	 * Report the pipe now that the base is ours. Two attempts at forcing 32 bpp
+	 * produced a sheared screen, so the format is left alone; what is checked
+	 * is that the stride the panel scans equals what the console writes. See
+	 * fb32.c.
 	 */
 	stage = "fb";
 	shim_fb_report();
@@ -522,13 +519,6 @@ void shim_main(uint64_t dtb)
 	con_skip();
 	stage = "perf";
 	perf_boost();
-	con_skip();
-
-	/*
-	 * Read the pipe out last, next to the other bring-up output, so one photo
-	 * has the display geometry and the storage state together.
-	 */
-	shim_fb_report();
 	con_skip();
 
 	stage = "loader";
