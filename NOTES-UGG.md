@@ -1,7 +1,83 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
 
-## ★★★★★ 最新（2026-11-15 13:55，第 23 轮）-- 重启真因找到了：RPM 触摸供电投票复位 SoC
+## ★★★★★ 最新（2026-11-15 14:10，第 24 轮）-- ★ 内核跑起来了！进了 kernel_startup_bootstrap
+
+### 重大进展：XNU 第一次真正执行，而且它的文字能看清
+
+照片上半部是**黑底白字**（XNU 自己的 early console，24bpp 分支生效）：
+
+```
+SWEET EARLY 1: arm_init entered (MMU on)
+SWEET EARLY 2: PE_init_platform
+SWEET EARLY 3: ml_parse_cpu_topology
+SWEET EARLY 4: cpu_bootstrap done
+SWEET EARLY 5: kernel_startup_bootstrap
+SWEET EARLY PANIC: machine_routines.c:1244
+  assertion failed: cpu_id <= (unsigned int)ml_get_max_cpu_number()
+```
+
+**这句话的意义**：
+
+| 以前 | 现在 |
+|---|---|
+| 屏幕停在 shim，看不到任何内核输出 | **内核跑完 4 个阶段，自己的文字显示出来了** |
+| 一直重启 | **不重启了**（RPM 修复生效） |
+| 不知道有没有进内核 | **确定进了，`JUMP 00000000A042A488`** |
+
+### 本轮修掉的：cpu_id 断言
+
+`ml_get_cpu_number()` 找不到 CPU 时返回 **-1**，转 unsigned 变成
+`0xFFFFFFFF`，必然大于 `max_cpu_id` → 断言炸。
+
+修法（`osfmk/arm64/machine_routines.c`）：
+
+```c
+if (cpu_id < 0 || cpu_id > (unsigned int)ml_get_max_cpu_number()) {
+        printf("SWEET CPU MAP: mpidr=%llx masked=%x -> id %d, max %d, using boot cpu %d\n", ...);
+        cpu_id = (unsigned int)ml_get_boot_cpu_number();
+}
+```
+
+同时给 `ml_get_cluster_number_local()` 加了同样的兜底。
+**不是把断言删掉了**——还会打印真实的 MPIDR 和拓扑 id，为的是下一轮能看到差异。
+
+### eMMC 真实分区（照片首次完整读出）
+
+```
+GPT boot    F=790528   N=131072     (64 MB)
+GPT cache   F=7471104  N=524288     (256 MB)
+GPT userdat F=11010048 N=111132...  <- 末位被截断，需要下一张照片
+GPT used=48
+```
+
+### LOG WRITE E=5 的含义
+
+`e=5` = 等 `ST_WR_READY` 超时（写通路没就绪），不是致命错误。
+现在有 IMEM 面包屑，不依赖 eMMC 日志，所以**不阻塞主线**。
+
+### 硬阻塞：C 盘空间不够放根镜像
+
+| 项 | 值 |
+|---|---|
+| 根镜像 artifact | `ios16-root-parts`，5.4 GB 压缩，过期 2026-11-19 |
+| 拼开后 | 约 12 GB |
+| C 盘可用 | **6.7 GB** |
+
+→ **本机无法拼合**。必须：换有空间的机器、或先清盘、或直接下到移动硬盘。
+详见 `docs/INSTALL-UGG.md` 第 2 节。
+
+### 下一轮
+
+内核编出来后启动，看是否越过 `kernel_startup_bootstrap` 继续往下：
+`cpu_init` → `processor_bootstrap` → `bsd_init` → 等 `Apple_HFS`。
+到 `bsd_init` 就需要根镜像了。
+
+---
+
+
+
+## ★★★★★ 上一轮（2026-11-15 13:55，第 23 轮）-- 重启真因找到了：RPM 触摸供电投票复位 SoC
 
 ### 用户照片（滚动已生效，最后一行是决定性证据）
 
@@ -705,7 +781,7 @@ fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
 ---
 
 
-## ★★★★★ 最新（2026-11-15 06:10，第 17 轮）-- /product 已打通；文件已修复
+## ★★★★★ 上一轮（2026-11-15 06:10，第 17 轮）-- /product 已打通；文件已修复
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1653 行，权威且无损）。
 
