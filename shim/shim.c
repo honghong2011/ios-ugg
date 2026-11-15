@@ -102,6 +102,12 @@ stage_prev(void)
 #define STAGE(id)	stage_set(id)
 #else
 #define STAGE(id)	do { } while (0)
+/* Boards without an IMEM stage word simply have no history to report. */
+static unsigned int
+stage_prev(void)
+{
+	return 0xffffffffu;
+}
 #endif
 static volatile uint64_t sec_mpidr[NR_CPUS];
 #if !GIC_IS_V2
@@ -515,8 +521,22 @@ void shim_main(uint64_t dtb)
 	 * First line on purpose: this is the value the previous boot left behind,
 	 * and it is the only evidence that survives a reboot.
 	 */
-	con_hex("LAST", (uint64_t)stage_prev());
-	con_puts(" (stage of the previous boot)\n");
+	{
+		unsigned int last = stage_prev();
+		con_hex("LASTSTAGE", last);
+		if (last == 0xffffffffu) {
+			con_str("PREV", "clear/unknown (cold reset)");
+		} else if (last >= 7) {
+			con_str("PREV", "reached the XNU jump");
+		} else {
+			con_str("PREV", "stopped in the shim itself");
+		}
+		/*
+		 * Stamp 1 immediately: if the machine never reaches the next stage we
+		 * want a later boot to say so rather than to repeat this answer.
+		 */
+		STAGE(1);
+	}
 #if defined(BOARD_HAS_PROBE)
 	con_str("SHIM", BOARD_NAME " loader + board probe");
 #else
