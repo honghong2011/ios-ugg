@@ -12,6 +12,7 @@
 #include "fdt.h"
 #include "loader.h"
 #include "mmu.h"
+#include "emmc.h"
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
@@ -174,6 +175,17 @@ const char *loader_boot(uintptr_t dtb)
 	    (p->segs[2].file_off + (p->entry_va - p->segs[2].vmaddr))));
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
+
+	/*
+	 * Flush the console log here, not only at the end of the eMMC probe.
+	 *
+	 * Everything above -- INITRD, PHYS, ENTRY, SEGS, BOOTARG, WROTE, EXPECT,
+	 * JUMP -- is printed after the probe's flush, so a dump taken from the
+	 * cache partition would end before the most useful lines of the boot. This
+	 * is the last point where the shim still controls the CPU, so it is the
+	 * last chance to persist what happened.
+	 */
+	ugg_emmc_flush_log();
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	/*

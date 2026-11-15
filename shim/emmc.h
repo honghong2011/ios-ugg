@@ -7,3 +7,16 @@
  * Never writes outside a partition literally named "cache".
  */
 void ugg_emmc_probe(void);
+
+/*
+ * Write the console log ring to the "cache" partition and verify it.
+ *
+ * The log has to be flushed more than once. The first flush happens at the end
+ * of the eMMC probe, but by then the most valuable lines of the boot -- the
+ * RGB0 pipe report, the loader's INITRD/PHYS/ENTRY and "XNU jumping" -- have
+ * not been printed yet, so a single early flush persists a log that stops
+ * exactly where the interesting part begins. Cheap enough to call again.
+ *
+ * No-op when there is no writable "cache" partition.
+ */
+void ugg_emmc_flush_log(void);

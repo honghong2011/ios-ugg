@@ -107,12 +107,18 @@ gpt_walk(void)
 	}
 }
 
-static void
-flush_log(void)
+void
+ugg_emmc_flush_log(void)
 {
 	if (!write_ok) {
 		return;
 	}
+	/*
+	 * The log is written while the console keeps appending to it, so the
+	 * message below lands in the ring and shows up in the NEXT flush. That is
+	 * harmless (the ring is the source of truth) but worth knowing when
+	 * reading the dump: the last line of a dump is one flush behind.
+	 */
 	int e = 0;
 	for (int i = 0; i < LOG_SECTORS && !e; i++) {
 		e = sdhc_write(cache_first + i, (const void *)(con_log_phys() + 512UL * i));
@@ -159,5 +165,5 @@ ugg_emmc_probe(void)
 		return;
 	}
 	gpt_walk();
-	flush_log();
+	ugg_emmc_flush_log();
 }
