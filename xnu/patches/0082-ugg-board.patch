@@ -2718,7 +2718,7 @@ index d7a25f2..a2d8d31 100644
  
  #endif
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
-index 384118e..8705994 100644
+index 384118e..eddeee6 100644
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
 @@ -104,6 +104,36 @@
@@ -2821,7 +2821,51 @@ index 384118e..8705994 100644
  			}
  			mask <<= 1;
  		} while (mask); /* while the single bit drops to the right */
-@@ -1611,6 +1670,76 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+@@ -1567,6 +1626,43 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+ 	    (yy * ISO_CHAR_HEIGHT * vinfo.v_rowbytes) +
+ 	    (xx * ISO_CHAR_WIDTH * 4));
+ 
++	/*
++	 * UGG: when one font pixel covers more than one framebuffer pixel, use
++	 * the straightforward scaled painter. The two upstream branches below
++	 * stay byte-for-byte untouched for vc_cell_scale == 1, so nothing about
++	 * the stock 32 bpp path changes when the scaling is off.
++	 */
++	if (vc_cell_scale != 1) {
++		int sy, sx;
++
++		where = (uint32_t*)(vinfo.v_baseaddr +
++		    (yy * VC_CELL_H * vinfo.v_rowbytes) +
++		    (xx * VC_CELL_W * 4));
++		for (i = 0; i < ISO_CHAR_HEIGHT; i++) {
++			for (sy = 0; sy < vc_cell_scale; sy++) {
++				uint32_t *store = where;
++				int x;
++
++				for (x = 0; x < ISO_CHAR_WIDTH; x++) {
++					uint32_t val = theChar[i * ISO_CHAR_WIDTH + x];
++
++					if (attrs & ATTR_REVERSE) {
++						val = ~val;
++					}
++					if ((attrs & ATTR_UNDER) && i == ISO_CHAR_HEIGHT - 1) {
++						val = ~val;
++					}
++					val = (vc_color_back & ~val) | (vc_color_fore & val);
++					for (sx = 0; sx < vc_cell_scale; sx++) {
++						*store++ = val;
++					}
++				}
++				where = (uint32_t*)(((unsigned char*)where) + vinfo.v_rowbytes);
++			}
++		}
++		return;
++	}
++
+ 	if (!attrs) {
+ 		for (i = 0; i < ISO_CHAR_HEIGHT; i++) {         /* No attrs ? FLY ! */
+ 			uint32_t *store = where;
+@@ -1611,6 +1707,76 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
  	}
  }
  
@@ -2898,7 +2942,7 @@ index 384118e..8705994 100644
  static void
  vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
      unsigned char ch_previous, int attrs_previous)
-@@ -1627,6 +1756,10 @@ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+@@ -1627,6 +1793,10 @@ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
  		vc_paint_char_16(xx, yy, ch, attrs, ch_previous,
  		    attrs_previous);
  		break;
@@ -2909,7 +2953,7 @@ index 384118e..8705994 100644
  	case 30:
  	case 32:
  		vc_paint_char_32(xx, yy, ch, attrs, ch_previous,
-@@ -1707,25 +1840,42 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+@@ -1707,25 +1877,42 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
  		return;
  	}
  
@@ -2959,7 +3003,7 @@ index 384118e..8705994 100644
  		}
  		where = (uint32_t*)(((unsigned char*)where) + vinfo.v_rowbytes);
  	}
-@@ -1734,31 +1884,37 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+@@ -1734,31 +1921,37 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
  static void
  vc_scroll_down(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
  {
@@ -3013,7 +3057,7 @@ index 384118e..8705994 100644
  			from -= rowline;
  			to -= rowline;
  		}
-@@ -1768,30 +1924,28 @@ vc_scroll_down(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
+@@ -1768,30 +1961,28 @@ vc_scroll_down(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
  static void
  vc_scroll_up(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
  {
@@ -3057,7 +3101,7 @@ index 384118e..8705994 100644
  			from += rowline;
  			to += rowline;
  		}
-@@ -1883,6 +2037,81 @@ static void vc_blit_rect_16(int x, int y, int bx,
+@@ -1883,6 +2074,81 @@ static void vc_blit_rect_16(int x, int y, int bx,
      const unsigned char * dataPtr,
      unsigned short * backBuffer,
      unsigned int flags);
@@ -3139,7 +3183,7 @@ index 384118e..8705994 100644
  static void vc_blit_rect_32(int x, int y, int bx,
      int width, int height,
      int sourceWidth, int sourceHeight,
-@@ -1930,6 +2159,9 @@ vc_blit_rect(int x, int y, int bx,
+@@ -1930,6 +2196,9 @@ vc_blit_rect(int x, int y, int bx,
  	case 16:
  		vc_blit_rect_16( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned short *) backBuffer, flags );
  		break;
@@ -3149,7 +3193,7 @@ index 384118e..8705994 100644
  	case 32:
  		vc_blit_rect_32( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned int *) backBuffer, flags );
  		break;
-@@ -2078,6 +2310,7 @@ vc_blit_rect_16( int x, int y, int bx,
+@@ -2078,6 +2347,7 @@ vc_blit_rect_16( int x, int y, int bx,
  }
  
  
@@ -3157,7 +3201,7 @@ index 384118e..8705994 100644
  static void
  vc_blit_rect_32(int x, int y, int bx,
      int width, int height,
-@@ -2777,9 +3010,30 @@ gc_pause( boolean_t pause, boolean_t graphics_now )
+@@ -2777,9 +3047,30 @@ gc_pause( boolean_t pause, boolean_t graphics_now )
  static void
  vc_initialize(__unused struct vc_info * vinfo_p)
  {
