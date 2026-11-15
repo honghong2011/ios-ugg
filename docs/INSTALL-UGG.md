@@ -198,6 +198,11 @@ adb shell "blkid /dev/block/bootdevice/by-name/userdata"
 
 ---
 
+> **需要另一台电脑？** 见 [`ROOT-IMAGE-OTHER-PC.md`](ROOT-IMAGE-OTHER-PC.md)：
+> 那台机器上怎么装 `gh`、下哪 7 个分片、怎么校验拼合、
+> 以及 CI 里各步骤在干什么，全部逐条写好了。
+> 镜像已构建好躺在 GitHub 上（run `43644714094`，**2026-11-19 到期**），
+> 不需要本地重新构建。
 ## 5. 把 iOS 根镜像写进去
 
 **关键：目标分区是 `userdata`，不是 `system`。**
