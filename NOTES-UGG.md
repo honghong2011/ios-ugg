@@ -1,7 +1,79 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
 
-## ★★★★★ 最新（2026-11-15 15:20，第 25 轮）-- 按交接单核对：CPU 断言根因锁定在 AKDT 的 boot 核标记
+## ★★★★★ 最新（2026-11-15 15:40，第 26 轮）-- 内核在打印了！文字糊掉是滚动拷贝放大 4 倍
+
+### 实机结果：两行 CPU MAP 没出现 = CPU 这关过了
+
+照片 2（红底）里 shim 走完：
+
+```
+INPUT  skipped: RPM LDO vote resets th...
+PERF   skipped: leave clocks as LK set...
+INITRD lo=100B0000 hi=120B0000
+PHYS   base=A0000000 size=5FF00000
+ENTRY  FFFFFFF00742B488
+```
+
+**没有出现 `SWEET CPU MAP` 两行** —— 按交接单判据，说明兜底没触发或已越过，
+CPU 断言这关**已经过了**。
+
+照片 1（黑底蓝字）是 **XNU 自己的控制台在打印**，只是文字糊了。
+**内核跑起来了，而且能往屏幕上画字** —— 这是自移植开始最大的进展。
+
+### 糊屏的真因：`video_scroll.c` 拷贝长度放大 4 倍
+
+```c
+bcopy(end, dest, ((char *)start - (char *)end) << 2);
+```
+
+`start/end` 是 `void*` 转 `char*`，减法**已经是字节数**，再 `<<2` 就是 ×4。
+滚一行会多抄 4 行，把刚写好的内容覆盖掉 → 每次都更糊。**这正是照片里
+那种「每行重复、错位叠加」的样子。**
+
+### 同源问题：`vc_scroll_up/down` 按 32 位字算
+
+它们用 `v_rowbytes >> 2` 把行宽换成「字数」——**只有在 1 像素 = 4 字节时才对**。
+我们跑 24bpp（1 像素 3 字节），单位就对不上了。已全部改成 `unsigned char*`
++ 直接用 `v_rowbytes` / `v_rowscanbytes`。32bpp 行为不变，24bpp 正确。
+
+### 再降一层风险：画字改成直接读 `iso_font`
+
+原来的 `vc_paint_char_24` 依赖 `vc_rendered_font`（按色深展开的字模缓存），
+**缓存元素尺寸和绘制步长是两套独立计算**，一旦不一致就是照片里那种重叠字。
+
+现在**直接从 `iso_font` 读 8×16 位图**（每字符 16 字节，和 `sweet_early`
+已验证可读的那套完全一样），只有一种字模表示、一种寻址方式，
+没有会跑偏的地方。
+
+### 新增可读诊断
+
+```
+SWEET VC: depth,rowbytes=<depth<<32|rowbytes>,<v_baseaddr>
+```
+
+走 `sweet_early`（已验证可读的控制台），确认内核实际用 24bpp / 2160 / 0x90000000。
+以后屏幕再花，这一行直接指出是哪一边不对，不用再猜一轮。
+
+### 顺带
+
+| 改动 | 说明 |
+|---|---|
+| 删 CI 的 qemu job | 每轮省 ~20 分钟 |
+| `ugg_find_partition()` 成功也打印 | `UGG EMMC: userdata first=... nblocks=... (.. MiB)` |
+
+### 踩的坑（记录）
+
+用脚本改写 `video_console.c` 时，**插入点误匹配了 `vc_paint_char_32` 里的
+行内注释 `/* bold support */`**，把那个函数改坏了。
+已从上一版成功的 0082 补丁重建该文件再重做修改，并用「花括号平衡 = 0」
++「`vc_paint_char_24` 只定义 1 次」做校验。**改这类文件后必须查这两项。**
+
+---
+
+
+
+## ★★★★★ 上一轮（2026-11-15 15:20，第 25 轮）-- 按交接单核对：CPU 断言根因锁定在 AKDT 的 boot 核标记
 
 ### 交接单带来的关键事实（我之前漏了）
 
