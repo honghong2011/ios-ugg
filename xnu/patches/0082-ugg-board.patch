@@ -2541,23 +2541,28 @@ index 023086f..b34507b 100644
  	ret
  
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 6928957..e24d69e 100644
+index 6928957..102aca9 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
-@@ -11,11 +11,32 @@
+@@ -11,11 +11,37 @@
  #include <stdint.h>
  #include <kern/misc_protos.h>
  
 -static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
 +#if defined(UGG)
 +/*
-+ * ugg: 24 bpp. This panel scans 2160-byte rows (proven twice by photograph),
-+ * so a 32 bpp write shears every line. The kernel's own video console cannot
-+ * paint 24 bpp, which is handled separately; this bootstrap console is what
-+ * carries the panic registers, so it must be the format that actually shows.
++ * ugg: 32 bpp, matching the MDP RGB0 pipe the shim hands over.
++ *
++ * This console used to paint 24 bpp because that is what LK leaves RGB0 in.
++ * The shim now switches the pipe to BGRX8888 immediately before the jump
++ * (shim/fb32.c), so anything drawn here after that switch must be 32 bpp or
++ * it lands on the panel with the wrong stride and shears. Panics happen after
++ * the switch, which is exactly when this console matters, so it follows the
++ * pipe. A colour bar selftest on hardware confirmed the 32 bpp scan chain
++ * (see NOTES-UGG.md round 28).
 + */
-+static volatile uint8_t *early_fb8 = (volatile uint8_t *)(uintptr_t)UGG_FB_PHYS;
-+#define early_fb early_fb8
++static volatile uint32_t *early_fb32 = (volatile uint32_t *)(uintptr_t)UGG_FB_PHYS;
++#define early_fb early_fb32
 +/* start.s UGG_MARK parks x0-x3 here (no stack that early). */
 +extern uint64_t ugg_mark_save[4];
 +uint64_t ugg_mark_save[4];
@@ -2569,7 +2574,7 @@ index 6928957..e24d69e 100644
 +#if defined(UGG)
 +#define EARLY_WIDTH UGG_FB_WIDTH
 +#define EARLY_HEIGHT UGG_FB_HEIGHT
-+#define EARLY_STRIDE (UGG_FB_STRIDE / 3)
++#define EARLY_STRIDE (UGG_FB_STRIDE / UGG_FB_BPP)
 +#else
  #define EARLY_WIDTH 1080u
  #define EARLY_HEIGHT 2400u
@@ -2578,7 +2583,7 @@ index 6928957..e24d69e 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
-@@ -28,13 +49,30 @@ extern unsigned char iso_font[256 * 16];
+@@ -28,13 +54,28 @@ extern unsigned char iso_font[256 * 16];
  static unsigned int early_row, early_col;
  static unsigned int early_started, early_disabled, early_panicking;
  
@@ -2590,10 +2595,8 @@ index 6928957..e24d69e 100644
 +early_px(unsigned x, unsigned y, uint32_t c)
 +{
 +#if defined(UGG)
-+	volatile uint8_t *p = early_fb + (uintptr_t)y * EARLY_STRIDE * 3u + (uintptr_t)x * 3u;
-+	p[0] = (uint8_t)(c >> 16);
-+	p[1] = (uint8_t)(c >> 8);
-+	p[2] = (uint8_t)c;
++	/* 32 bpp: one word per pixel, BGRX (X unused). */
++	early_fb32[(uintptr_t)y * EARLY_STRIDE + (uintptr_t)x] = c;
 +#else
 +	EARLY_FB[y * EARLY_STRIDE + x] = c;
 +#endif
@@ -2611,7 +2614,7 @@ index 6928957..e24d69e 100644
  		}
  	}
  }
-@@ -64,13 +102,11 @@ sweet_early_putc(char c)
+@@ -64,13 +105,11 @@ sweet_early_putc(char c)
  	const unsigned char *glyph = iso_font + (unsigned char)c * 16;
  	for (unsigned int gy = 0; gy < 16; gy++) {
  		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
@@ -2627,7 +2630,7 @@ index 6928957..e24d69e 100644
  				}
  			}
  		}
-@@ -78,6 +114,7 @@ sweet_early_putc(char c)
+@@ -78,6 +117,7 @@ sweet_early_putc(char c)
  	early_col++;
  }
  
@@ -2635,7 +2638,7 @@ index 6928957..e24d69e 100644
  static void
  sweet_early_string(const char *s)
  {
-@@ -86,16 +123,48 @@ sweet_early_string(const char *s)
+@@ -86,16 +126,48 @@ sweet_early_string(const char *s)
  	}
  }
  
@@ -2687,15 +2690,6 @@ index 6928957..e24d69e 100644
  		}
  	}
  	__asm__ volatile("dsb sy" ::: "memory");
-@@ -129,7 +198,7 @@ void
- sweet_early_relocate(uint64_t base)
- {
- 	sweet_early_mark(8, "leaving bootstrap TTBR0");
--	early_fb = (volatile uint32_t *)(uintptr_t)base;
-+	early_fb = (volatile uint8_t *)(uintptr_t)base;
- 	__asm__ volatile("dsb sy" ::: "memory");
- 	sweet_early_mark(9, "kernel framebuffer VA live");
- }
 diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
 index d7a25f2..a2d8d31 100644
 --- a/osfmk/arm64/sweet_early.h
@@ -3641,7 +3635,7 @@ index 9004f2b..bcad464 100644
  
  #ifdef PRIVATE
 diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
-index b99c2f4..9673393 100644
+index b99c2f4..63e9300 100644
 --- a/pexpert/pexpert/arm64/SWEET.h
 +++ b/pexpert/pexpert/arm64/SWEET.h
 @@ -17,6 +17,13 @@
@@ -3692,7 +3686,7 @@ index b99c2f4..9673393 100644
  #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
  
  #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
-@@ -80,4 +99,29 @@
+@@ -80,4 +99,39 @@
  #define ICC_SRE_SRE                             0x1
  /* End of GICv3 register definitions */
  
@@ -3719,6 +3713,16 @@ index b99c2f4..9673393 100644
 +#define UGG_FB_BLOCKS            2
 +#define UGG_FB_WIDTH             720u
 +#define UGG_FB_HEIGHT            1280u
-+#define UGG_FB_BPP               3      /* BGR888, what this panel scans */
-+#define UGG_FB_STRIDE            2160u   /* 720 * 3 */
++/*
++ * 32 bpp is what the panel scans after the shim switches RGB0 to BGRX8888
++ * (shim/fb32.c, stage -> commit -> jump). It is also the only depth XNU can
++ * use: SweetFramebuffer refuses fRowBytes < fWidth * 4, so at 24 bpp the GUI
++ * never attaches, and upstream video_console has no 24 bpp painter.
++ *
++ * The shim's own boot console is 24 bpp and stays 24 bpp -- it runs before
++ * the switch, when RGB0 is still BGR888 as LK left it. Do not change anything
++ * here to 3 to match the shim console; the two are deliberately different.
++ */
++#define UGG_FB_BPP               4      /* BGRX8888, what this panel scans */
++#define UGG_FB_STRIDE            2880u   /* 720 * 4 */
  #endif /* ! _PEXPERT_ARM64_SWEET_H */
