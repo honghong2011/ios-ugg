@@ -2585,6 +2585,275 @@ index 6928957..1ebaa09 100644
  	__asm__ volatile("dsb sy" ::: "memory");
  	sweet_early_mark(9, "kernel framebuffer VA live");
  }
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 384118e..6fc4965 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1258,9 +1258,19 @@ vcputc(char c)
+ /*
+  * For the color support (Michel Pollet)
+  */
++/*
++ * Which column of vc_colors[] to use for a given depth: 8 bpp palettes in
++ * column 0, 16 bpp in 1, 30 bpp in 2, 32 bpp in 3.
++ *
++ * Entry 24 was 0, i.e. 24 bpp inherited the 8 bpp palette, where "white" is
++ * 0x00000000 and "black" is 0xFFFFFFFF. With a 24 bpp console that renders
++ * black text on a black field. UGG's panel is 24 bpp, so point 24 at the
++ * 32 bpp column: it is a plain 0xRRGGBB word, which is exactly what the 24 bpp
++ * painters split into three bytes.
++ */
+ static unsigned char vc_color_index_table[33] =
+ {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-   1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 2 };
++   1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 3, 0, 2 };
+ 
+ static uint32_t vc_colors[8][4] = {
+ 	{ 0xFFFFFFFF, 0x00000000, 0x00000000, 0x00000000 },     /* black */
+@@ -1383,6 +1393,7 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
+ 		unsigned short *shortptr;
+ 		uint32_t  *longptr;
+ 	} current;      /* current place in rendered font, multiple types. */
++	unsigned char *byteptr;  /* 24 bpp: three bytes per pixel, no usable union member */
+ 	unsigned char *theChar; /* current char in iso_font */
+ 	int line;
+ 
+@@ -1404,6 +1415,23 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
+ 			case 32:
+ 				*current.longptr++ = (*theChar & mask) ? 0xFFFFFFFF : 0;
+ 				break;
++			case 24:
++				/*
++				 * UGG: the panel scans 24 bpp (3 bytes per pixel), which
++				 * upstream has no case for. The rendered font stores the
++				 * coverage mask as three bytes, all ones for ink and all
++				 * zeros for paper, so the paint path below can still use
++				 * the (back & ~val) | (fore & val) trick per byte.
++				 */
++				byteptr = (unsigned char *)current.charptr;
++				{
++					unsigned char v = (*theChar & mask) ? 0xFF : 0x00;
++					byteptr[0] = v;
++					byteptr[1] = v;
++					byteptr[2] = v;
++					current.charptr += 3;
++				}
++				break;
+ 			}
+ 			mask <<= 1;
+ 		} while (mask); /* while the single bit drops to the right */
+@@ -1611,6 +1639,75 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+ 	}
+ }
+ 
++
++/*
++ * UGG: 24 bpp painter.
++ *
++ * The panel leaves LK scanning 2160-byte rows (720 * 3), proven twice by
++ * photograph: a 32 bpp write compresses the image vertically by 2160/2880 and
++ * shifts each row by 540 pixels, which is exactly what "4 bytes written, 3
++ * bytes scanned" produces.
++ *
++ * Upstream vc_paint_char() has cases for 8, 16, 30 and 32 only, so with
++ * v_depth = 24 the kernel drew NOTHING at all -- which is why the screen went
++ * blank after the jump and no kernel text was ever seen. This is the missing
++ * case. It mirrors vc_paint_char_32 but addresses bytes and advances by three
++ * per pixel, and applies the coverage mask one byte at a time.
++ */
++static void
++vc_paint_char_24(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
++    unsigned char ch_previous, int attrs_previous)
++{
++	unsigned char *theChar;
++	unsigned char *theCharPrevious;
++	unsigned char *where;
++	int i;
++
++	if (vc_rendered_font) {
++		theChar = vc_rendered_font + (ch * vc_rendered_char_size);
++		theCharPrevious = vc_rendered_font + (ch_previous * vc_rendered_char_size);
++	} else {
++		vc_render_char(ch, vc_rendered_char, 24);
++		theChar = vc_rendered_char;
++		theCharPrevious = NULL;
++	}
++	if (!ch_previous || attrs_previous) {
++		theCharPrevious = NULL;
++	}
++
++	where = (unsigned char *)(vinfo.v_baseaddr +
++	    (yy * ISO_CHAR_HEIGHT * vinfo.v_rowbytes) +
++	    (xx * ISO_CHAR_WIDTH * 3));
++
++	for (i = 0; i < ISO_CHAR_HEIGHT; i++) {
++		unsigned char *store = where;
++		int x;
++		for (x = 0; x < 8; x++) {
++			unsigned char m0 = *theChar++;
++			unsigned char m1 = *theChar++;
++			unsigned char m2 = *theChar++;
++			unsigned char v0 = m0, v1 = m1, v2 = m2;
++
++			if (attrs & ATTR_REVERSE) {
++				v0 = (unsigned char)~v0;
++				v1 = (unsigned char)~v1;
++				v2 = (unsigned char)~v2;
++			}
++			if (attrs & ATTR_UNDER && i == ISO_CHAR_HEIGHT - 1) {
++				v0 = (unsigned char)~v0;
++				v1 = (unsigned char)~v1;
++				v2 = (unsigned char)~v2;
++			}
++
++			*store++ = (unsigned char)((vc_color_back & ~v0) | (vc_color_fore & v0));
++			*store++ = (unsigned char)((vc_color_back & ~v1) | (vc_color_fore & v1));
++			*store++ = (unsigned char)((vc_color_back & ~v2) | (vc_color_fore & v2));
++		}
++		where += vinfo.v_rowbytes;
++	}
++	(void)theCharPrevious;
++}
++
+ static void
+ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+     unsigned char ch_previous, int attrs_previous)
+@@ -1627,6 +1724,10 @@ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+ 		vc_paint_char_16(xx, yy, ch, attrs, ch_previous,
+ 		    attrs_previous);
+ 		break;
++	case 24:
++		vc_paint_char_24(xx, yy, ch, attrs, ch_previous,
++		    attrs_previous);
++		break;
+ 	case 30:
+ 	case 32:
+ 		vc_paint_char_32(xx, yy, ch, attrs, ch_previous,
+@@ -1707,9 +1808,15 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+ 		return;
+ 	}
+ 
++	/*
++	 * Byte offset of the cursor cell. Upstream writes xx * v_depth, which is
++	 * only right when v_depth is 8; for every other depth it has to be
++	 * xx * ISO_CHAR_WIDTH * bytes-per-pixel. Corrected here because the 24
++	 * bpp case is live on this board.
++	 */
+ 	where = (uint32_t*)(vinfo.v_baseaddr +
+ 	    (yy * ISO_CHAR_HEIGHT * vinfo.v_rowbytes) +
+-	    (xx /** ISO_CHAR_WIDTH*/ * vinfo.v_depth));
++	    (xx * ISO_CHAR_WIDTH * ((vinfo.v_depth + 7) / 8)));
+ 	for (line = 0; line < ISO_CHAR_HEIGHT; line++) {
+ 		switch (vinfo.v_depth) {
+ 		case 8:
+@@ -1726,6 +1833,14 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+ 				where[col] = ~where[col];
+ 			}
+ 			break;
++		case 24: {
++			/* 8 pixels * 3 bytes = 24 bytes; invert colour without the padding byte. */
++			unsigned char *b = (unsigned char *)where;
++			for (col = 0; col < 24; col++) {
++				b[col] = (unsigned char)~b[col];
++			}
++			break;
++		}
+ 		}
+ 		where = (uint32_t*)(((unsigned char*)where) + vinfo.v_rowbytes);
+ 	}
+@@ -1930,6 +2045,9 @@ vc_blit_rect(int x, int y, int bx,
+ 	case 16:
+ 		vc_blit_rect_16( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned short *) backBuffer, flags );
+ 		break;
++	case 24:
++		vc_blit_rect_24( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned char *) backBuffer, flags );
++		break;
+ 	case 32:
+ 		vc_blit_rect_32( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned int *) backBuffer, flags );
+ 		break;
+@@ -2078,6 +2196,82 @@ vc_blit_rect_16( int x, int y, int bx,
+ }
+ 
+ 
++
++/*
++ * UGG: 24 bpp variant of vc_blit_rect_32, for scrolling, clearing and the
++ * progress bar. Same structure, but the destination is addressed as bytes and
++ * each pixel is three stores.
++ */
++static void
++vc_blit_rect_24(int x, int y, int bx,
++    int width, int height,
++    int sourceWidth, int sourceHeight,
++    int sourceRow, int backRow,
++    const unsigned char * dataPtr,
++    unsigned char * backPtr,
++    unsigned int flags)
++{
++	volatile unsigned char * dst;
++	int line, col;
++	unsigned int data = 0;
++	int sx, sy, a, b, c, d;
++	int scale = 0x10000;
++
++	a = (sourceRow == 1) ? 0 : vc_rotate_matr[kDataRotate & flags][0][0] * scale;
++	b = (sourceRow == 1) ? 0 : vc_rotate_matr[kDataRotate & flags][0][1] * scale;
++	c = vc_rotate_matr[kDataRotate & flags][1][0] * scale;
++	d = vc_rotate_matr[kDataRotate & flags][1][1] * scale;
++
++	sx = ((a + b) < 0) ? ((sourceWidth * scale)  - 0x8000) : 0;
++	sy = ((c + d) < 0) ? ((sourceHeight * scale) - 0x8000) : 0;
++
++	if (!sourceRow) {
++		data = (unsigned int)(uintptr_t)dataPtr;
++	}
++
++	if (backPtr) {
++		backPtr += bx * 3;
++	}
++	dst = (volatile unsigned char *) (vinfo.v_baseaddr +
++	    (y * vinfo.v_rowbytes) +
++	    (x * 3));
++
++	for (line = 0; line < height; line++) {
++		for (col = 0; col < width; col++) {
++			unsigned int out;
++			unsigned char *p = (unsigned char *)&dst[col * 3];
++			if (sourceRow) {
++				data = dataPtr[((sx + (col * a) + (line * b)) >> 16)
++				    + sourceRow * (((sy + (col * c) + (line * d)) >> 16))];
++			}
++			if (kDataIndexed & flags) {
++				out = (vc_clut[data * 3 + 0] << 16)
++				    | (vc_clut[data * 3 + 1] << 8)
++				    | (vc_clut[data * 3 + 2]);
++			} else {
++				out = data;
++			}
++			if (backPtr && (kSave & flags)) {
++				backPtr[col * 3 + 0] = p[0];
++				backPtr[col * 3 + 1] = p[1];
++				backPtr[col * 3 + 2] = p[2];
++			}
++			/*
++			 * v_depth 24 means the console colours are plain 0xRRGGBB,
++			 * so the three bytes go out in R, G, B order -- the same
++			 * order the shim's own console uses on this panel.
++			 */
++			p[0] = (unsigned char)(out >> 16);
++			p[1] = (unsigned char)(out >> 8);
++			p[2] = (unsigned char)out;
++		}
++		dst = (volatile unsigned char *)(((volatile char*)dst) + vinfo.v_rowbytes);
++		if (backPtr) {
++			backPtr += (backRow - width) * 3;
++		}
++	}
++}
++
+ static void
+ vc_blit_rect_32(int x, int y, int bx,
+     int width, int height,
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index bec97fb..9452c84 100644
 --- a/osfmk/kern/startup.c
