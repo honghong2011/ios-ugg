@@ -13,6 +13,7 @@
 #include "sdhc.h"
 #include "emmc.h"
 #include "fb32.h"
+#include "selftest.h"
 #include "rpm.h"
 #include "perf.h"
 #include "input.h"
@@ -444,6 +445,18 @@ void shim_main(uint64_t dtb)
 	 * the wrong stride and the screen is diagonal garbage.
 	 */
 	int fb32 = shim_fb_to_32bpp();
+
+	/*
+	 * Proof-of-display before anything else. The panel is the only output this
+	 * phone has, so a photograph of a known colour pattern has to be enough to
+	 * say whether our writes and the panel scan-out agree on the pitch. Text
+	 * cannot do that: when the geometry is wrong the text is unreadable, which
+	 * is exactly the situation this is meant to diagnose.
+	 *
+	 * 12 s hold: long enough to pick up a camera, short enough that the pattern
+	 * is not mistaken for a hang.
+	 */
+	shim_display_selftest(12000);
 	
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
