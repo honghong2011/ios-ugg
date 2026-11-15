@@ -1,7 +1,97 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
 
-## ★★★★★ 最新（2026-11-15 13:35，第 22 轮）-- 照片里藏着两个致命 bug，都已修
+## ★★★★★ 最新（2026-11-15 13:55，第 23 轮）-- 重启真因找到了：RPM 触摸供电投票复位 SoC
+
+### 用户照片（滚动已生效，最后一行是决定性证据）
+
+```
+LOG WRITE E                    <- 日志写 cache 失败（这就是拿不到日志的原因）
+RPM: SMEM TBL=863064f8 SZ=0800
+PORT=00060000 FIFO=00060800/04
+ST=4
+REOPEN: TX ST=2 RX ST=2        <- 最后一行，然后重启
+```
+
+### 重启真因：不是看门狗，不是 XNU，是 shim 自己
+
+`rpm.c` 头部注释原话：
+
+> a write to an RPM-owned LDO that the arbiter does not expect is
+> **an arbiter violation and resets the SoC**
+
+照片停在 `REOPEN`（RPM 通道刚打开），**下一件事就是 `input_setup()` 去投 L10**。
+L10 是 **mido 的触摸供电轨**，没有证据表明 ugg 是同一个。→ **arbiter violation → SoC 复位。**
+
+这也解释了一直以来的困惑：`WDT EN=0`（看门狗没开）、我们的 `reset()` 已删干净。
+**是 shim 在跳内核前一步把自己复位了。**
+
+**修法**：
+
+```c
+#define BOARD_TOUCH_RAIL  0   /* 触摸是「用」iOS 才需要，不是「启动」需要 */
+#define BOARD_PERF_BOOST  0   /* perf.c 自己警告最后一个读会复位 SoC */
+```
+
+其他板子保持默认 1，行为不变。
+
+### 新增：IMEM 阶段面包屑（本轮最重要的诊断手段）
+
+屏幕每次启动都重画，**但 IMEM 复位后不清**。所以每个阶段往 `IMEM_STAGE`
+（`0x08600600`）写一个数字，下次启动第一行打印：
+
+```
+LASTSTAGE = 0000000000000007
+PREV      reached the XNU jump
+```
+
+| 值 | 含义 |
+|---|---|
+| `0xffffffff` | IMEM 被清，发生了比热复位更冷的事 |
+| 1-6 | **shim 自己**停在该阶段 |
+| >=7 | **已跳到 XNU**，之后的重启是内核的 |
+
+这一个数字就区分了以前完全无法区分的两种情况。
+
+### 另外两个修复
+
+1. **滚动清除颜色 bug**：只写了 `con_bg & 0xff`，红色 `0xffff0000` 的最低位是 0
+   → 新滚出来的行是**黑色**（照片底部那条暗带就是这个）。已改成写完整三字节。
+2. **`LOG WRITE E` 现在打印错误码和扇区号**：`E=<cmd24错误> SEC=<第几个扇区>`。
+   扇区 0 失败 = 写通路从未工作；中途失败 = 写出界。
+
+### 本轮产物
+
+```
+shim-boot-0082-mido.img  8,173,568 B
+sha256 9c86d46c599dfa839f95a545ca8b7b09083ffc494bd49e2bdc8cd9080ebab0ea
+```
+
+内核沿用（本轮只改 shim）：sha256 `f8617484e44d40774ca071c21b68812585aeaed48ef75bf024f8633a87f286f0`。
+shim CI run `43682733963`（success）。
+
+### 编译踩的坑（已修，记录备查）
+
+| 错误 | 原因 |
+|---|---|
+| `last_err undeclared` | 它是 `sdhc.c` 的 static |
+| `i undeclared` | 循环变量出了作用域 |
+| `undefined reference to con_puts` | `con_puts` 只在 `mido_compat.h`，`shim.c` 没 include |
+
+### 下一轮判断
+
+| 看到 | 含义 | 下一步 |
+|---|---|---|
+| 不重启 + `XNU jumping` | ✅ RPM 修复成功 | 看内核文字 |
+| 不重启但停在 emmc/input | 阶段号会指出 | 看 `LASTSTAGE` |
+| 仍重启 + `LASTSTAGE=6` | perf 阶段 | 继续排除 |
+| 重启后 `LASTSTAGE>=7` | **已跳到 XNU**，重启是内核的 | 查 XNU panic |
+
+---
+
+
+
+## ★★★★★ 上一轮（2026-11-15 13:35，第 22 轮）-- 照片里藏着两个致命 bug，都已修
 
 上机手册已独立成文：**`docs/INSTALL-UGG.md`**（放镜像 + TWRP 清理，逐步可执行）。
 
@@ -559,7 +649,7 @@ fastboot boot C:\Users\Administrator\Desktop\ios-ugg\shim-boot-0082-mido.img
 
 12 秒后自动继续正常启动（eMMC 探测 → 打印管道报告 → 跳内核）。
 
-## ★★★★★ 最新（2026-11-15 07:45，第 17 轮）-- /product 拿到了；上机手册已写
+## ★★★★★ 上一轮（2026-11-15 07:45，第 17 轮）-- /product 拿到了；上机手册已写
 
 > 完整记录：`docs/MIDO-PORT-PLAN.md`（1700+ 行，权威且无损）。
 > **上机测试手册：`TEST-GUIDE.md`** —— 照着做就行。
