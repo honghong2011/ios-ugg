@@ -44,30 +44,60 @@ qcom,pet-time  = 0x2710  (10000 ms)
 compatible     = "qcom,msm-watchdog"
 ```
 
+### ⚠️ 重要更正：第一版看门狗代码是错的（已修）
+
+我第一版 `wdt.c` 的寄存器偏移是**凭印象写的**，用的是另一套 `qcom-wdt.c`/KPSS 布局。
+查了真实驱动后确认全错，而且**错得很危险**。
+
+本板设备树写的是 `compatible = "qcom,msm-watchdog"` / `reg-names = "wdt-base"`，
+对应 `drivers/watchdog/msm_wdt.c`，布局是：
+
+```
+WDT_RST       = 0x04   ← 写 1 就是喂狗
+WDT_EN        = 0x08   ← bit0 使能
+WDT_STS       = 0x0C
+WDT_BARK_TIME = 0x10
+WDT_BITE_TIME = 0x14
+WDT_HZ        = 32768
+```
+
+**为什么危险**：旧代码把 `0x04` 当成 LOAD，但它其实是 `WDT_RST` ——
+写它就是**喂狗**。旧代码会往 `WDT_RST` 写 120 秒的 tick 数、往 `WDT_EN` 写 tick 数，
+等于**用垃圾值重新武装看门狗**，而不是关掉它。
+
+同时修了两处：
+
+| 项 | 错误 | 正确 |
+|---|---|---|
+| 停止顺序 | 先清 EN | `msm_wdt_disable()` 是**先喂狗再清 EN** |
+| 单位 | 拿 `0x3fff` 当 tick 上界 | 计数器存 **tick**（驱动写 `10*WDT_HZ`）；`WDT_MAXTIMEOUT` 是**秒** |
+
+单位错会导致：把**正常**的看门狗（`10*32768=0x50000`）判为"不合理"，从而**拒绝关闭**。
+
 ### 本轮改了什么
 
 | 文件 | 改动 |
 |---|---|
-| `shim/wdt.c`（新） | 读 CTRL/CTRL1/LOAD/VAL/BARK/BITE/STATUS；**仅当 EN 已置位**才关；先把超时拉到 120s/300s 再清 EN |
+| `shim/wdt.c`（新） | 读 EN/STS/BARK/BITE；**仅当 EN 已置位**才关；按 `msm_wdt_disable()` 先喂狗再清 EN |
 | `shim/wdt.h`（新） | 接口 |
 | `shim/shim.c` | 控制台初始化**提前**到看门狗之前（否则红屏把报告擦掉）；删掉 12 秒自检图 |
 | `shim/build.sh` | 加入 `wdt.c`，移除 `selftest.c` |
 
-**为什么先拉长超时再关**：万一 EN 位被 TrustZone 保护、清的没生效，
-手机也有几分钟而不是 15 秒。RESET 寄存器（0x14）**永不写**。
+**加了合理性闸门**：EN 不是恰好 0/1、或 BITE < BARK，就**一个字节都不写**。
+这样以后即使偏移再猜错，也碰不到硬件。
 
 ### 新镜像（刷这个）
 
 ```
 shim-boot-0082-mido.img  8,171,520 B
-sha256 8ce7317e71787dd77f838c2981a103b6a8b9b276241f4f1e12d600e41bbb81db
+sha256 f179442f0c629a5fe2060c2e97fd5ba059a63f1303f6328ddcf258f16f12aba0
 ```
 
 ```
 fastboot boot C:\\Users\\Administrator\\Desktop\\ios-ugg\\shim-boot-0082-mido.img
 ```
 
-已核实镜像内（解 gzip 后）含 `WDT CTRL=` / `WDT STOP was=` / `WDT LOAD=`，
+已核实镜像内（解 gzip 后）含 `WDT STOP en was=` / `WDT not armed` / `WDT SKIP` / `IMPLAUSIBLE`，
 且 `selftest` 已消失；payload 里 `/product` 存在。
 
 ### 这次开机应该看到什么
@@ -76,9 +106,9 @@ fastboot boot C:\\Users\\Administrator\\Desktop\\ios-ugg\\shim-boot-0082-mido.im
 
 ```
 SHIM ugg loader + board probe      <- 先红屏清屏
-BOOT WDT CTRL=xxxxxxxx C1=... ST=... ARMED 或 off
-BOOT WDT LOAD=... VAL=... BARK=... BITE=...
-WDT STOP was=... now=... ok 或 STILL ARMED   <- 仅当原本 ARMED
+BOOT WDT EN=... STS=... ARMED 或 off
+BOOT WDT BARK=...ms=15000 BITE=...ms=18000
+WDT STOP en was=... now=... ok 或 STILL ARMED   <- 仅当原本 ARMED
 PREVBOOT xxxxxxxx
 INITRD ...
 EMMC / CACHE / LOG TO CACHE ...
@@ -90,9 +120,9 @@ XNU jumping ...
 
 | 看到 | 含义 |
 |---|---|
-| `WDT ... ARMED` 然后 `WDT STOP ... ok` | ✅ 看门狗已关，启动不再被咬 |
+| `WDT ... ARMED` 然后 `WDT STOP en ... ok` | ✅ 看门狗已关，启动不再被咬 |
 | `WDT ... off` | 本来就没装，复位另有原因 |
-| `WDT STOP ... STILL ARMED` | TZ 保护，只能靠拉长的超时 |
+| `WDT SKIP: registers implausible` | 偏移仍不对，已拒绝写入 |
 | 卡住不再重启 | ✅ 本轮目标达成 |
 
 ### 取日志的两条路（下一步）
