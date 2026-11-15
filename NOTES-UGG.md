@@ -85,6 +85,13 @@ run `43644714094`，**2026-11-19 21:59 UTC 到期**（约 4 天）。
 
 注意：刷 userdata 会抹掉 Android 全部数据（已批准方案，但不可逆）。
 
+### 产物
+
+| 文件 | 内容 | sha256 |
+|---|---|---|
+| `shim-boot-0085-errno.img` | 含 errno 判定，**先刷这个** | `4750097dd0dfb0a6c2e1f738d386fb56b7fd524c9f8bab7421b8f4a884fa23fd` |
+| 内核 | CI `43722404833` (success) | `ded3bfbeed2d5da841eead5d08199be8e9b6901ca3e81057edede580ef3df6ca` |
+
 
 ## ★★★★★ （2026-11-15 17:25，第 29 轮）-- 色带实证 32bpp 正确；补齐 sweet_early 的 32bpp
 
