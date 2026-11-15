@@ -439,30 +439,22 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 
 	/*
-	 * Everything here writes 24 bpp, which is what LK leaves in RGB0: the
-	 * earlier 32 bpp switch did not take effect on this panel and made every
-	 * scanline shear, including the shim console that was supposed to report it.
-	 * The registers are still read out, because ADDR/FMT/STRIDE are the first
-	 * thing to look at when the screen is wrong.
-	 */
-
-	/*
-	 * The watchdog first, before anything slow.
+	 * ORDER MATTERS, and it is not the obvious one.
 	 *
-	 * LK arms the APSS watchdog and stops petting it. Nothing in this image or
-	 * in XNU pets it either, so a fixed number of seconds after the jump the
-	 * phone resets itself -- which is what has been wiping the boot between
-	 * "kernel printed something" and "log captured". Report it, then stop it.
+	 * The console below writes 32 bpp. The panel only agrees with that once
+	 * RGB0 has been switched, so the switch has to happen BEFORE the first
+	 * pixel is drawn -- but con_clear() needs the console, and the console
+	 * output is what tells us whether the switch worked. Resolve it by
+	 * clearing in the colour the pipe may or may not honour (it is a full
+	 * frame either way, so a wrong-format clear looks red and nothing is
+	 * lost), then switching, then drawing the report. Every line after the
+	 * switch is drawn with the geometry that is now actually in the pipe.
 	 *
-	 * The colour self-test that used to run here has been removed: its photo
-	 * proved the 24 bpp geometry is right, and the hold was long enough to be
-	 * one of the things the watchdog was biting on.
-	 */
-	/*
-	 * Start the console first this time. The red field the user photographed
-	 * just before the reboot is this con_clear(RED): it means the shim did get
-	 * this far. Reporting the watchdog before the clear would throw that report
-	 * away, which is how the previous boot lost it.
+	 * The watchdog is reported here rather than first: PREVBOOT in the last
+	 * photograph read 0x77665500, which is this project's own
+	 * RESTART_BOOTLOADER, so the reset came from reset() below and not from
+	 * the watchdog (WDT EN read 0). It is kept because it is one line and it
+	 * settles the question for good.
 	 */
 	stage = "loader";
 	con_log_init();
@@ -472,6 +464,18 @@ void shim_main(uint64_t dtb)
 #else
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 #endif
+	con_skip();
+
+	stage = "fb";
+	if (!shim_fb_set_32bpp()) {
+		/*
+		 * The pipe refused. Keep going -- the boot may still be useful --
+		 * but the screen will be sheared or blank, and the photograph has
+		 * to be read as "hardware refused 32 bpp" rather than as a new
+		 * fault.
+		 */
+		con_str("FB", "32 bpp unavailable, expect a wrong screen");
+	}
 	con_skip();
 
 	stage = "wdt";
@@ -533,12 +537,25 @@ void shim_main(uint64_t dtb)
 		for (;;)
 			__asm__ volatile("wfe");
 	}
-	reset(20);
+	/*
+	 * Do NOT reset here. This was the restart that destroyed every previous
+	 * boot: loader_boot() returned, the shim printed the reason, and then
+	 * reset(20) rebooted the phone twenty seconds later -- after the screen
+	 * had been wiped but before anyone could photograph the reason. The last
+	 * photograph's PREVBOOT = 0x77665500 is this line's RESTART_BOOTLOADER,
+	 * so the reboot was self-inflicted, not the watchdog's.
+	 *
+	 * Hold the panel instead. The reason stays visible until the user holds
+	 * Power, which is what the probe branch above already does.
+	 */
+	con_str("STAY", "hold POWER to reboot");
+	for (;;)
+		__asm__ volatile("wfe");
 #else
 	/* No payload: the bring-up above already ran; just hold the screen. */
-	con_str("BRINGUP", "done, reset in ~3 min");
-	delay_ms(180000);
-	reset(20);
+	con_str("BRINGUP", "done, hold POWER to reboot");
+	for (;;)
+		__asm__ volatile("wfe");
 #endif
 	stage = "fill off";
 	uint64_t fill_off = ticks_fill(RED);

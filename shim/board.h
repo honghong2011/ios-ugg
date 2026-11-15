@@ -75,9 +75,26 @@
 #define FB_REGION_SIZE	0x1400000UL
 #define FB_W		720
 #define FB_H		1280
-#define FB_BPP		3		/* 24 bpp: what LK leaves; fb32.c may switch to 32 */
-#define FB_SCALE	2
+/*
+ * 32 bpp, as on mido.
+ *
+ * The 24 bpp experiment is over. It was adopted because a photograph showed
+ * the text sheared, which turned out to be a pitch mismatch, and 24 bpp fixed
+ * the geometry -- but it put the board on a path XNU cannot finish:
+ *
+ *   - osfmk/console/video_console.c paints only for v_depth 8, 16, 30 and 32,
+ *     so a kernel told v_depth = 24 draws nothing at all, and
+ *   - SweetFramebuffer::start() rejects fRowBytes < fWidth * 4, so the GUI
+ *     path cannot attach either.
+ *
+ * mido runs 32 bpp end to end (its shim console is a uint32_t * with
+ * FB_STRIDE = FB_W * 4) and reached the home screen that way. Take the same
+ * path. A frame is 720*4*1280 = 3.5 MiB, well inside the 20 MiB splash
+ * carve-out, which is 2 MiB aligned, so the MMU mapping needs two blocks.
+ */
+#define FB_BPP		4
 #define FB_SWAP_RB	0
+#define FB_SCALE	2
 
 #define GICD_BASE	0x0b000000UL
 #define GICC_BASE	0x0b002000UL
