@@ -1,6 +1,84 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-15 16:50，第 28 轮）-- 走 mido 的路：切 32 bpp 端到端 + 色带自检
+## ★★★★★ 最新（2026-11-15 17:25，第 29 轮）-- 色带实证 32bpp 正确；补齐 sweet_early 的 32bpp
+
+### 实机结果：色带完全正确，32bpp 扫描链结案
+
+`shim-boot-0083-fbtest.img` 上机，两张照片：
+
+**照片 1（红屏，24bpp 控制台）**：
+
+```
+RGB0 FMT 0002243f -> 000236ff
+RGB0 STRIDE 00000870 -> 00000b40
+RGB0 UNPACK -> 03020001
+RGB0 32BPP staged (registers read back)
+VIDEO rowbytes 0000000000000B40
+VIDEO depth 0000000000000020
+```
+
+**照片 2**：6 条纯色竖条（红/绿/蓝/白/灰/黑），颜色顺序正确，
+1 像素白边框紧贴屏幕四边，**没有任何竖条、错位、色偏**。
+
+结论（这次是实证，不是推断）：
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| `SRC_FORMAT` 0x236ff 生效 | 回读 | 写入即读回 |
+| `UNPACK` 0x03020001 字节序正确 | **红条是红的** | B,G,R,X 没搞反 |
+| `YSTRIDE` 2880 | 边框竖直不斜 | stride 正确 |
+| 宽高 720x1280 | 边框紧贴四边 | 尺寸正确 |
+| boot_args 2880/32 | VIDEO 行回读 | 一致 |
+
+**24bpp -> 32bpp 切换这条路彻底走通。**
+
+### 必须一起修掉的：`sweet_early` 还是 24bpp
+
+这是切换 32bpp 之后新出现的隐患，而且是**致命的**，因为：
+
+`osfmk/kern/debug.c:1077` 在 `panic_trap_to_debugger()` 的最开头调用
+`sweet_early_panic()`——**panic 原文是走这个控制台打出来的**。
+而 `arm_init.c:551` 只有 `serial_exists` 为真才 `sweet_early_disable()`，
+ugg 没有串口，所以它**一直活着**。
+
+也就是说：我们把管道切成 32bpp，但 panic 打印机还在按 3 字节/像素写 ——
+一旦 panic，屏幕上是乱码，等于把唯一的诊断通道弄瞎了。
+
+改动（`osfmk/arm64/sweet_early.c`、`pexpert/pexpert/arm64/SWEET.h`）：
+
+| 位置 | 旧 | 新 |
+|---|---|---|
+| `UGG_FB_BPP` | 3 | **4** |
+| `UGG_FB_STRIDE` | 2160 | **2880** |
+| `early_fb` 类型 | `volatile uint8_t *` | `volatile uint32_t *` |
+| `early_px()` | 写 3 字节 | 写 1 个字 |
+| `EARLY_STRIDE` | `STRIDE / 3` | `STRIDE / UGG_FB_BPP` |
+
+`EARLY_SCALE 2` 不变，所以红屏仍是 2 倍字，panic 依然能拍清。
+
+注意：**shim 的引导控制台仍然必须是 24bpp**，它在切换之前运行，那时 RGB0
+还是 LK 留下的 BGR888。两个控制台刻意不同，两边都写进了注释，防止以后有人
+"统一"成一样。
+
+### 顺带确认
+
+`SweetFramebuffer.cpp:187`：
+
+```c
+if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) { ... }
+```
+
+现在 `fRowBytes = 2880 == fWidth * 4`，**GUI 这条硬门槛第一次满足**。
+这是控制器能走到桌面的前提。
+
+### 产物
+
+| 文件 | 内容 | sha256 |
+|---|---|---|
+| 内核 | 32bpp + 2 倍 vc + 32bpp sweet_early，CI `43699026717` | 编译中 |
+
+
+## ★★★★★ （2026-11-15 16:50，第 28 轮）-- 走 mido 的路：切 32 bpp 端到端 + 色带自检
 
 ### 为什么必须切 32 bpp（不是"优化"，是硬约束）
 
