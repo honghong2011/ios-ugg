@@ -1,6 +1,92 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-15 17:25，第 29 轮）-- 色带实证 32bpp 正确；补齐 sweet_early 的 32bpp
+## ★★★★★ 最新（2026-11-15 22:30，第 30 轮）-- 32bpp 控制台完全清晰；卡点锁定为「userdata 上没有 iOS 文件系统」
+
+### 实机：屏幕终于可读，而且信息量很大
+
+`shim-boot-0084-32bpp.img` 上机，文字**逐行清晰**（2 倍字 + 32bpp 都生效）。
+两张照片合起来读到：
+
+```
+SWEET FB: AppleCLCD 720x1280 stride 2880 at 0x90000000,
+          default surface 1, presented as 750x1334
+SWEET CPU: 1/1 CPUs initialized, SGI1 verified
+bsd_init: calling IOKitInitializeTime
+UGG tick 1: bootstrap at bsd_init
+...
+bsd_init: calling net_init_run
+bsd_init: calling inittodr
+bsd_init: calling setconf
+UGG EMMC: userdata first=1376256 nblocks=... (54263 MiB)
+SWEET UFS: userdata on LUN 0: first block 0x150000, 54263 MiB, read-write, DMA at 0xa24ec000
+```
+
+三个里程碑：
+
+| 事实 | 意义 |
+|---|---|
+| `presented as 750x1334` | **iPhone 8 逻辑分辨率**，`SweetFramebuffer` 已挂上 GUI 通道 |
+| `1/1 CPUs initialized, SGI1 verified` | SMP 与 GIC 都正常 |
+| `SWEET UFS: userdata ... read-write, DMA` | **eMMC 驱动第一次真正工作**（54 GB、DMA 都对了） |
+
+### 卡点：`vfs_mountroot()` 反复失败（但被滚掉了）
+
+`bsd_init.c:874` 是个 `while (TRUE)`：
+
+```c
+while (TRUE) {
+    bsd_init_kprintf("calling setconf\n");      // ← 照片最后一行
+    setconf();                                  // 每轮重新探测 eMMC（所以 UGG EMMC 又打一遍）
+    bsd_init_kprintf("vfs_mountroot\n");
+    if (0 == (err = vfs_mountroot())) break;    // ← 失败
+    rootdevice[0] = '\0';
+    printf("cannot mount root, errno = %d\n", err);   // ← 每轮都被滚掉
+}
+```
+
+这也解释了照片里「`dlil_init` 出现在 `ether_family_init` 之后」这种**源码顺序上不可能**的排列——
+是 `setconf()` 重跑把屏幕搅乱了，不是 bug。
+
+**根因**：userdata 上是 Android 的 ext4/f2fs，不是 iOS 的 HFS+。
+`vfs_mountroot` 找不到可挂载的卷，失败是必然的。
+
+### 为什么它会重启
+
+搜遍整棵树：`PE_halt_restart` **只有声明、没有任何赋值**，
+所以 `IOPlatformExpert::haltRestart()` 永远返回 -1，**XNU 自己不会重启**。
+`SWEET WDT` 也是空壳（注释原文 “accepts check-ins, never fires”）。
+
+→ 重启来自那个循环跑太久，**硬件里预设的看门狗**（LK/PBL）复位了 SoC。
+
+### 本轮改动：不再无声循环（commit `30e0391`）
+
+```c
+printf("UGG ROOT FAIL: rootdevice=\"%s\" errno=%d args=\"%s\"\n",
+    rootdevice, err, PE_boot_args());
+panic("UGG: no root filesystem on %s (errno %d)", rootdevice, err);
+```
+
+下一张照片直接给 errno，不用再猜。同时不再循环几分钟等看门狗打断。
+
+### 新文档：`docs/ROOT-IMAGE-OTHER-PC.md`（393 行）
+
+回答「另一台电脑怎么搞」：装 `gh` → 下 7 个分片 → `sha256sum -c` → `cat` 拼合
+→ 校验 `11970598900` 字节 → 走法 A（拷回主力机刷）或走法 B（就地刷）。
+还写了 CI 十步在干什么、产物过期怎么重建、errno 对照表。
+
+**关键资产**：根镜像已构建好，`ios16-root-parts`（5,837,838,248 B，7 分片），
+run `43644714094`，**2026-11-19 21:59 UTC 到期**（约 4 天）。
+
+### 下一步（顺序不能反）
+
+1. **先刷含 errno 的内核**，确认 `errno=19`（ENODEV = 没有文件系统）
+2. 若 errno 不是 19（5=EIO / 6=ENXIO），**先别刷镜像**，那是 eMMC 层问题
+3. errno=19 → 按新文档下载拼合 → `fastboot -S 256M flash userdata` → 再启动
+
+注意：刷 userdata 会抹掉 Android 全部数据（已批准方案，但不可逆）。
+
+
+## ★★★★★ （2026-11-15 17:25，第 29 轮）-- 色带实证 32bpp 正确；补齐 sweet_early 的 32bpp
 
 ### 实机结果：色带完全正确，32bpp 扫描链结案
 
