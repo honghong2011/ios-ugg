@@ -90,7 +90,7 @@ WDT_HZ        = 32768
 
 ```
 shim-boot-0082-mido.img  8,171,520 B
-sha256 f179442f0c629a5fe2060c2e97fd5ba059a63f1303f6328ddcf258f16f12aba0
+sha256 bcd1b5779a07404b1170fd64bcc0f59c8a6ac92be7813fc1a02898039a315c1f
 ```
 
 ```
@@ -124,6 +124,39 @@ XNU jumping ...
 | `WDT ... off` | 本来就没装，复位另有原因 |
 | `WDT SKIP: registers implausible` | 偏移仍不对，已拒绝写入 |
 | 卡住不再重启 | ✅ 本轮目标达成 |
+
+### ⚠️ 自我更正：上一轮说"看门狗是真凶"说得太满
+
+看门狗**仍是最可疑的**，但**尚未证明**。重读代码后发现一个更有说服力的解释：
+
+**shim 的控制台本来就是红底黄字。** `shim.c` 的 `shim_main` 一进来就 `con_clear(RED)`。
+而自检图是黑底的。所以用户描述的"红屏前有字的探测界面"，
+**就是 shim 自己的红底控制台** —— 那个"红屏"很可能不是故障，
+而是这个控制台滚到了下面、或某次重绘后的样子。
+
+两种解释都还没被实机区分开。可以区分的证据：新镜像里 `WDT EN=` 那行的读数。
+
+### 另一个真 bug（新发现）：XNU 视频控制台画不出 24bpp
+
+`osfmk/console/video_console.c` 的 `vc_paint_char()` 只处理 **8 / 16 / 30 / 32**：
+
+```c
+switch (vinfo.v_depth) {
+case 8: ... case 16: ... case 30: case 32: ...
+}   /* 没有 case 24 */
+```
+
+而 shim 传进去的是 `ba->Video.v_depth = FB_BPP * 8 = 24`。
+**所以 XNU 的视频控制台在 24bpp 下一个像素都不画。**
+早期控制台（`sweet_early.c`，自己直接写 24bpp）能用，
+但它一旦 `sweet_early_disable()`，内核文字就彻底没有输出了。
+
+同理 `SweetFramebuffer.cpp` 第 187 行要求 `fRowBytes >= fWidth * 4`，
+24bpp 的 2160 字节行宽过不了这个检查 —— 所以 GUI 那条路在 24bpp 下也走不通。
+
+**这是一个策略性问题**：mido 是把 MDP 切到 32bpp/BGRA 才出 GUI 的。
+我们之前因为"切换没生效"放弃了 32bpp，而那个放弃现在正好卡住了 GUI。
+留待下一轮决策。
 
 ### 取日志的两条路（下一步）
 
