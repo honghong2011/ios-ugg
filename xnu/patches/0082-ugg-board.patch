@@ -2718,10 +2718,21 @@ index d7a25f2..a2d8d31 100644
  
  #endif
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
-index 384118e..6d50097 100644
+index 384118e..0c841b6 100644
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
-@@ -1258,9 +1258,19 @@ vcputc(char c)
+@@ -104,6 +104,10 @@
+ #include <sys/kdebug.h>
+ 
+ #include "iso_font.c"
++
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ #if defined(XNU_TARGET_OS_OSX)
+ #include "progress_meter_data.c"
+ #endif
+@@ -1258,9 +1262,19 @@ vcputc(char c)
  /*
   * For the color support (Michel Pollet)
   */
@@ -2742,7 +2753,7 @@ index 384118e..6d50097 100644
  
  static uint32_t vc_colors[8][4] = {
  	{ 0xFFFFFFFF, 0x00000000, 0x00000000, 0x00000000 },     /* black */
-@@ -1383,6 +1393,7 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
+@@ -1383,6 +1397,7 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
  		unsigned short *shortptr;
  		uint32_t  *longptr;
  	} current;      /* current place in rendered font, multiple types. */
@@ -2750,7 +2761,7 @@ index 384118e..6d50097 100644
  	unsigned char *theChar; /* current char in iso_font */
  	int line;
  
-@@ -1404,6 +1415,23 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
+@@ -1404,6 +1419,23 @@ vc_render_char(unsigned char ch, unsigned char *renderptr, short newdepth)
  			case 32:
  				*current.longptr++ = (*theChar & mask) ? 0xFFFFFFFF : 0;
  				break;
@@ -2774,83 +2785,72 @@ index 384118e..6d50097 100644
  			}
  			mask <<= 1;
  		} while (mask); /* while the single bit drops to the right */
-@@ -1611,6 +1639,75 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+@@ -1611,6 +1643,64 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
  	}
  }
  
 +
 +/*
-+ * UGG: 24 bpp painter.
++ * UGG: 24 bpp character painter, rendered straight from iso_font.
 + *
-+ * The panel leaves LK scanning 2160-byte rows (720 * 3), proven twice by
-+ * photograph: a 32 bpp write compresses the image vertically by 2160/2880 and
-+ * shifts each row by 540 pixels, which is exactly what "4 bytes written, 3
-+ * bytes scanned" produces.
++ * The panel scans 2160-byte rows (720 * 3), proven by photograph twice, so the
++ * console must paint 24 bpp. Upstream vc_paint_char() has cases for 8, 16, 30
++ * and 32 only -- with v_depth = 24 the kernel drew NOTHING at all.
 + *
-+ * Upstream vc_paint_char() has cases for 8, 16, 30 and 32 only, so with
-+ * v_depth = 24 the kernel drew NOTHING at all -- which is why the screen went
-+ * blank after the jump and no kernel text was ever seen. This is the missing
-+ * case. It mirrors vc_paint_char_32 but addresses bytes and advances by three
-+ * per pixel, and applies the coverage mask one byte at a time.
++ * This deliberately does not use vc_rendered_font. That path expands each glyph
++ * into a buffer whose size is derived from the depth, and the first version of
++ * this function read it back with an independently computed stride; when the
++ * two disagreed the panel showed doubled, overlapping text, which is exactly
++ * what the photograph showed. Reading the 8x16 bitmap directly leaves one glyph
++ * representation (16 bytes) and one addressing mode (bytes), so there is
++ * nothing left to get out of step.
++ *
++ * Byte order matches the shim's console: 0xRRGGBB written as R, G, B.
 + */
 +static void
 +vc_paint_char_24(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
-+    unsigned char ch_previous, int attrs_previous)
++    unsigned char ch_previous __unused, int attrs_previous __unused)
 +{
-+	unsigned char *theChar;
-+	unsigned char *theCharPrevious;
++	const unsigned char *glyph = iso_font + (unsigned int)ch * ISO_CHAR_HEIGHT;
 +	unsigned char *where;
-+	int i;
++	unsigned int fg = vc_color_fore, bg = vc_color_back;
++	int i, x;
 +
-+	if (vc_rendered_font) {
-+		theChar = vc_rendered_font + (ch * vc_rendered_char_size);
-+		theCharPrevious = vc_rendered_font + (ch_previous * vc_rendered_char_size);
-+	} else {
-+		vc_render_char(ch, vc_rendered_char, 24);
-+		theChar = vc_rendered_char;
-+		theCharPrevious = NULL;
-+	}
-+	if (!ch_previous || attrs_previous) {
-+		theCharPrevious = NULL;
++	if (attrs & ATTR_REVERSE) {
++		unsigned int t = fg;
++		fg = bg;
++		bg = t;
 +	}
 +
-+	where = (unsigned char *)(vinfo.v_baseaddr +
-+	    (yy * ISO_CHAR_HEIGHT * vinfo.v_rowbytes) +
-+	    (xx * ISO_CHAR_WIDTH * 3));
++	where = (unsigned char *)(uintptr_t)vinfo.v_baseaddr +
++	    ((uintptr_t)yy * ISO_CHAR_HEIGHT * vinfo.v_rowbytes) +
++	    ((uintptr_t)xx * ISO_CHAR_WIDTH * 3u);
 +
 +	for (i = 0; i < ISO_CHAR_HEIGHT; i++) {
++		unsigned char bits = glyph[i];
 +		unsigned char *store = where;
-+		int x;
-+		for (x = 0; x < 8; x++) {
-+			unsigned char m0 = *theChar++;
-+			unsigned char m1 = *theChar++;
-+			unsigned char m2 = *theChar++;
-+			unsigned char v0 = m0, v1 = m1, v2 = m2;
 +
-+			if (attrs & ATTR_REVERSE) {
-+				v0 = (unsigned char)~v0;
-+				v1 = (unsigned char)~v1;
-+				v2 = (unsigned char)~v2;
-+			}
-+			if (attrs & ATTR_UNDER && i == ISO_CHAR_HEIGHT - 1) {
-+				v0 = (unsigned char)~v0;
-+				v1 = (unsigned char)~v1;
-+				v2 = (unsigned char)~v2;
-+			}
-+
-+			*store++ = (unsigned char)((vc_color_back & ~v0) | (vc_color_fore & v0));
-+			*store++ = (unsigned char)((vc_color_back & ~v1) | (vc_color_fore & v1));
-+			*store++ = (unsigned char)((vc_color_back & ~v2) | (vc_color_fore & v2));
++		if ((attrs & ATTR_UNDER) && i == ISO_CHAR_HEIGHT - 1) {
++			bits = 0xff;
 +		}
++
++		for (x = 0; x < ISO_CHAR_WIDTH; x++) {
++			unsigned int c = (bits & 1) ? fg : bg;
++			store[0] = (unsigned char)(c >> 16);
++			store[1] = (unsigned char)(c >> 8);
++			store[2] = (unsigned char)c;
++			store += 3;
++			bits = (unsigned char)(bits >> 1);
++		}
++
 +		where += vinfo.v_rowbytes;
 +	}
-+	(void)theCharPrevious;
 +}
 +
  static void
  vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
      unsigned char ch_previous, int attrs_previous)
-@@ -1627,6 +1724,10 @@ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
+@@ -1627,6 +1717,10 @@ vc_paint_char(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
  		vc_paint_char_16(xx, yy, ch, attrs, ch_previous,
  		    attrs_previous);
  		break;
@@ -2861,7 +2861,7 @@ index 384118e..6d50097 100644
  	case 30:
  	case 32:
  		vc_paint_char_32(xx, yy, ch, attrs, ch_previous,
-@@ -1707,9 +1808,15 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+@@ -1707,9 +1801,15 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
  		return;
  	}
  
@@ -2878,7 +2878,7 @@ index 384118e..6d50097 100644
  	for (line = 0; line < ISO_CHAR_HEIGHT; line++) {
  		switch (vinfo.v_depth) {
  		case 8:
-@@ -1726,6 +1833,14 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+@@ -1726,6 +1826,14 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
  				where[col] = ~where[col];
  			}
  			break;
@@ -2893,7 +2893,103 @@ index 384118e..6d50097 100644
  		}
  		where = (uint32_t*)(((unsigned char*)where) + vinfo.v_rowbytes);
  	}
-@@ -1883,6 +1998,81 @@ static void vc_blit_rect_16(int x, int y, int bx,
+@@ -1734,31 +1842,37 @@ vc_reverse_cursor(unsigned int xx, unsigned int yy)
+ static void
+ vc_scroll_down(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
+ {
+-	uint32_t *from, *to, linelongs, i, line, rowline, rowscanline;
++	unsigned char *from, *to;
++	uintptr_t linelongs, rowline, rowscanline;
++	int i, line;
+ 
+ 	if (!vinfo.v_depth) {
+ 		return;
+ 	}
+ 
+-	linelongs = vinfo.v_rowbytes * (ISO_CHAR_HEIGHT >> 2);
+-	rowline = vinfo.v_rowbytes >> 2;
+-	rowscanline = vinfo.v_rowscanbytes >> 2;
++	/*
++	 * UGG: byte addressing throughout.
++	 *
++	 * The upstream version worked in 32-bit words and divided both row sizes by
++	 * four to get there, which is only meaningful while a pixel is four bytes.
++	 * This board runs the console at 24 bpp, so the two units no longer
++	 * correspond and the arithmetic silently mixed them. Pointers to unsigned
++	 * char keep the units unambiguous and behave the same at every depth.
++	 */
++	linelongs = (uintptr_t)vinfo.v_rowbytes * ISO_CHAR_HEIGHT;
++	rowline = (uintptr_t)vinfo.v_rowbytes;
++	rowscanline = (uintptr_t)vinfo.v_rowscanbytes;
+ 
+-	to = (uint32_t *) vinfo.v_baseaddr + (linelongs * scrreg_bottom)
+-	    - (rowline - rowscanline);
+-	from = to - (linelongs * num);  /* handle multiple line scroll (Michel Pollet) */
++	to = (unsigned char *)(uintptr_t)vinfo.v_baseaddr +
++	    (linelongs * scrreg_bottom) - (rowline - rowscanline);
++	from = to - (linelongs * (uintptr_t)num);
+ 
+-	i = (scrreg_bottom - scrreg_top) - num;
++	i = (int)((scrreg_bottom - scrreg_top) - num);
+ 
+ 	while (i-- > 0) {
+ 		for (line = 0; line < ISO_CHAR_HEIGHT; line++) {
+-			/*
+-			 * Only copy what is displayed
+-			 */
+-			video_scroll_down(from,
+-			    (from - (vinfo.v_rowscanbytes >> 2)),
+-			    to);
+-
++			/* Only copy what is displayed. */
++			video_scroll_down(from, from - rowscanline, to);
+ 			from -= rowline;
+ 			to -= rowline;
+ 		}
+@@ -1768,30 +1882,28 @@ vc_scroll_down(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
+ static void
+ vc_scroll_up(int num, unsigned int scrreg_top, unsigned int scrreg_bottom)
+ {
+-	uint32_t *from, *to, linelongs, i, line, rowline, rowscanline;
++	unsigned char *from, *to;
++	uintptr_t linelongs, rowline, rowscanline;
++	int i, line;
+ 
+ 	if (!vinfo.v_depth) {
+ 		return;
+ 	}
+ 
+-	linelongs = vinfo.v_rowbytes * (ISO_CHAR_HEIGHT >> 2);
+-	rowline = vinfo.v_rowbytes >> 2;
+-	rowscanline = vinfo.v_rowscanbytes >> 2;
++	/* UGG: byte addressing; see vc_scroll_down(). */
++	linelongs = (uintptr_t)vinfo.v_rowbytes * ISO_CHAR_HEIGHT;
++	rowline = (uintptr_t)vinfo.v_rowbytes;
++	rowscanline = (uintptr_t)vinfo.v_rowscanbytes;
+ 
+-	to = (uint32_t *) vinfo.v_baseaddr + (scrreg_top * linelongs);
+-	from = to + (linelongs * num);  /* handle multiple line scroll (Michel Pollet) */
++	to = (unsigned char *)(uintptr_t)vinfo.v_baseaddr + (linelongs * scrreg_top);
++	from = to + (linelongs * (uintptr_t)num);
+ 
+-	i = (scrreg_bottom - scrreg_top) - num;
++	i = (int)((scrreg_bottom - scrreg_top) - num);
+ 
+ 	while (i-- > 0) {
+ 		for (line = 0; line < ISO_CHAR_HEIGHT; line++) {
+-			/*
+-			 * Only copy what is displayed
+-			 */
+-			video_scroll_up(from,
+-			    (from + (vinfo.v_rowscanbytes >> 2)),
+-			    to);
+-
++			/* Only copy what is displayed. */
++			video_scroll_up(from, from + rowscanline, to);
+ 			from += rowline;
+ 			to += rowline;
+ 		}
+@@ -1883,6 +1995,81 @@ static void vc_blit_rect_16(int x, int y, int bx,
      const unsigned char * dataPtr,
      unsigned short * backBuffer,
      unsigned int flags);
@@ -2975,7 +3071,7 @@ index 384118e..6d50097 100644
  static void vc_blit_rect_32(int x, int y, int bx,
      int width, int height,
      int sourceWidth, int sourceHeight,
-@@ -1930,6 +2120,9 @@ vc_blit_rect(int x, int y, int bx,
+@@ -1930,6 +2117,9 @@ vc_blit_rect(int x, int y, int bx,
  	case 16:
  		vc_blit_rect_16( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned short *) backBuffer, flags );
  		break;
@@ -2985,7 +3081,7 @@ index 384118e..6d50097 100644
  	case 32:
  		vc_blit_rect_32( x, y, bx, width, height, sourceWidth, sourceHeight, sourceRow, backRow, dataPtr, (unsigned int *) backBuffer, flags );
  		break;
-@@ -2078,6 +2271,7 @@ vc_blit_rect_16( int x, int y, int bx,
+@@ -2078,6 +2268,7 @@ vc_blit_rect_16( int x, int y, int bx,
  }
  
  
@@ -2993,6 +3089,62 @@ index 384118e..6d50097 100644
  static void
  vc_blit_rect_32(int x, int y, int bx,
      int width, int height,
+@@ -2780,6 +2971,17 @@ vc_initialize(__unused struct vc_info * vinfo_p)
+ 	vinfo.v_rows = vinfo.v_height / ISO_CHAR_HEIGHT;
+ 	vinfo.v_columns = vinfo.v_width / ISO_CHAR_WIDTH;
+ 	vinfo.v_rowscanbytes = ((vinfo.v_depth + 7) / 8) * vinfo.v_width;
++#if defined(SWEET)
++	/*
++	 * UGG: state the geometry the kernel is about to draw with, on the console
++	 * that is known to render correctly (sweet_early, byte-wise 24 bpp). If the
++	 * panel and these numbers ever disagree the screen fills with sheared text,
++	 * and this line says which side is wrong without another guess.
++	 */
++	sweet_early_note("SWEET VC: depth,rowbytes=",
++	    ((uint64_t)vinfo.v_depth << 32) | vinfo.v_rowbytes,
++	    (uint64_t)vinfo.v_baseaddr);
++#endif
+ 	vc_uiscale = vinfo.v_scale;
+ 	if (vc_uiscale > kMaxProgressData) {
+ 		vc_uiscale = kMaxProgressData;
+diff --git a/osfmk/console/video_scroll.c b/osfmk/console/video_scroll.c
+index 439787d..71b7f13 100644
+--- a/osfmk/console/video_scroll.c
++++ b/osfmk/console/video_scroll.c
+@@ -29,10 +29,24 @@
+ #include <types.h>
+ #include <console/video_console.h>
+ 
++/*
++ * UGG: the length here is a BYTE count.
++ *
++ * Upstream shifted the difference left by two, which only makes sense if
++ * the pointers were word pointers. They are void pointers cast to char
++ * pointers, so the difference is already in bytes and the shift copied
++ * four times the intended range. For a row that is a quarter of the
++ * console that means every scroll re-copied four glyph rows over data it
++ * had just written, and the panel filled with smeared, doubly-shifted
++ * text -- exactly the corruption in the photograph.
++ *
++ * Byte semantics also make this independent of the pixel depth, which
++ * matters because this board runs the console at 24 bpp.
++ */
+ void
+ video_scroll_up(void * start, void * end, void * dest)
+ {
+-	bcopy(start, dest, ((char *)end - (char *)start) << 2);
++	bcopy(start, dest, (size_t)((char *)end - (char *)start));
+ }
+ 
+ void
+@@ -40,5 +54,6 @@ video_scroll_down(void * start,      /* HIGH addr */
+     void * end,                      /* LOW addr */
+     void * dest)                     /* HIGH addr */
+ {
+-	bcopy(end, dest, ((char *)start - (char *)end) << 2);
++	/* UGG: byte count, not words -- see video_scroll_up(). */
++	bcopy(end, dest, (size_t)((char *)start - (char *)end));
+ }
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index bec97fb..9452c84 100644
 --- a/osfmk/kern/startup.c
