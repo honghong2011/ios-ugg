@@ -137,23 +137,27 @@ ugg_emmc_flush_log(void)
 	 * reading the dump: the last line of a dump is one flush behind.
 	 */
 	int e = 0;
-	for (int i = 0; i < LOG_SECTORS && !e; i++) {
+	int bad = -1;
+	for (int i = 0; i < LOG_SECTORS; i++) {
 		e = sdhc_write(cache_first + i, (const void *)(con_log_phys() + 512UL * i));
+		if (e) {
+			bad = i;
+			break;
+		}
 	}
 	if (e) {
 		emmc_code = 8;
 		/*
 		 * Print the code. "LOG WRITE E" alone said a write failed but not
-		 * whether it was the command (the number is the CMD24 error), the
-		 * card status, or the programming timeout, and those need completely
-		 * different fixes.
+		 * whether it was the command (the number is the CMD24 error) or the
+		 * programming timeout, and those need different fixes. The sector
+		 * says whether the window is right: a failure at sector 0 means the
+		 * write path never worked, a failure part way in means it ran out.
 		 */
 		con_puts("LOG WRITE E=");
 		con_dec((uint64_t)e);
-		con_puts(" ERR=");
-		con_hex(last_err, 4);
 		con_puts(" SEC=");
-		con_dec((uint64_t)i);
+		con_dec((uint64_t)bad);
 		con_putc('\n');
 		return;
 	}
