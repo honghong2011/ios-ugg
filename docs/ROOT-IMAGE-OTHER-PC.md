@@ -118,6 +118,34 @@ df -h .
 
 ### 2.4 下载
 
+**方式一：浏览器（最直观）**
+
+打开这个链接，**滚到页面最底部**，在 **Artifacts** 区域点 `ios16-root-parts`：
+
+```
+https://github.com/honghong2011/ios-ugg/actions/runs/43644714094
+```
+
+> **必须登录 GitHub**。公开仓库的 artifact 也要求登录，没登录会看到 404。
+> 下载得到 `ios16-root-parts.zip`（5,837,838,248 字节）。
+
+解压它（**用 7-Zip，不要用 Windows 资源管理器**，5.8 GB 的 zip
+资源管理器经常解到一半报错）：
+
+```
+右键 -> 7-Zip -> 提取到 ios16-root-parts\
+```
+
+解压后得到 7 个 `.part` 文件 + `SHA256SUMS`，把它们放进 `parts/` 目录：
+
+```
+mkdir -p parts
+mv ios16-root-parts/* parts/
+ls -l parts
+```
+
+**方式二：命令行（支持断点续传，更可靠）**
+
 ```
 gh run download 43644714094 \
   -R honghong2011/ios-ugg \
@@ -126,6 +154,10 @@ gh run download 43644714094 \
 ```
 
 这一步拿 **7 个分片 + 一个 `SHA256SUMS`**，总共 5.84 GB，视网速 5–30 分钟。
+断了重跑同一条命令会**接着下**，而且自动解压好。
+
+> 浏览器下载**不支持断点续传**，5.8 GB 中途断了要从头再来；
+> 网络不稳时优先用方式二。
 
 ### 2.5 看一眼下到了什么
 
