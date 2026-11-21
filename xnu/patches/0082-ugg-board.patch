@@ -11,10 +11,10 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..acb7c78 100644
+index 6b926fe..acc4e45 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -117,6 +117,370 @@ static struct {
+@@ -117,6 +117,380 @@ static struct {
  static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
  static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
  
@@ -51,14 +51,24 @@ index 6b926fe..acb7c78 100644
 +static uint32_t ugg_resp;
 +
 +/*
-+ * UGG: force one single-block command (CMD17/CMD24) per sector.
++ * UGG: one single-block command (CMD17/CMD24) per sector. DEFAULT ON.
 + *
-+ * ugg/shim/sdhc.c only ever issues single-block transfers and has never been
-+ * seen to return wrong bytes. This driver prefers CMD18/CMD25 with auto-CMD12
-+ * for anything longer than one sector, which is the only transfer shape the
-+ * shim never exercises. Setting this makes the two comparable.
++ * ugg/shim/sdhc.c has read this eMMC successfully for weeks and does it
++ * entirely with CMD17, one sector per command. This driver preferred
++ * CMD18/CMD25 with auto-CMD12 for anything longer than a sector, and that is
++ * the only transfer shape the shim never exercises.
++ *
++ * The HFS failure points straight at it: a freshly flashed image that
++ * tools/check-hfs-root.py certifies as undamaged reaches /sbin/launchd and
++ * dies with errno 5 on catalog nodes 19174..19514 -- all inside the last
++ * catalog extent, in one contiguous run, with good nodes on both sides. A
++ * read-only mount reproduces the same values bit for bit, so nothing we write
++ * is at fault: the bytes coming back from the card are wrong.
++ *
++ * Single-sector transfers are slower but they are the shape that is known to
++ * work here. Boot-arg uggnomb=0 restores multi-block for benchmarking.
 + */
-+static int ugg_no_multiblock;
++static int ugg_no_multiblock = 1;
 +
 +static inline uint32_t
 +mh_rd(uint32_t o)
@@ -385,7 +395,7 @@ index 6b926fe..acb7c78 100644
  static inline uint32_t
  ufs_rd(uint32_t off)
  {
-@@ -129,13 +493,13 @@ ufs_wr(uint32_t off, uint32_t v)
+@@ -129,13 +503,13 @@ ufs_wr(uint32_t off, uint32_t v)
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
@@ -401,7 +411,7 @@ index 6b926fe..acb7c78 100644
  dma_clean(uint32_t off, uint32_t len)
  {
  	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -145,7 +509,7 @@ dma_clean(uint32_t off, uint32_t len)
+@@ -145,7 +519,7 @@ dma_clean(uint32_t off, uint32_t len)
   * One SCSI command in slot 0, data (if any) to/from the bounce buffer
   * (to the device when write is set). Returns 0 or an errno.
   */
@@ -410,7 +420,7 @@ index 6b926fe..acb7c78 100644
  ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  {
  	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
-@@ -260,6 +624,9 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+@@ -260,6 +634,9 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  static int
  ufs_read_blocks(uint64_t lba, uint32_t count)
  {
@@ -420,7 +430,7 @@ index 6b926fe..acb7c78 100644
  	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
  		return EINVAL;
  	}
-@@ -269,6 +636,7 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
+@@ -269,6 +646,7 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
  		0, (uint8_t)(count >> 8), (uint8_t)count, 0
  	};
  	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
@@ -428,7 +438,7 @@ index 6b926fe..acb7c78 100644
  }
  
  /*
-@@ -284,24 +652,35 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
+@@ -284,24 +662,35 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
  		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
  		return EPERM;
  	}
@@ -464,7 +474,7 @@ index 6b926fe..acb7c78 100644
  	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
  	int error = ufs_read_blocks(1, 1);
  	if (error) {
-@@ -351,11 +730,15 @@ ufs_find_partition(const char *want)
+@@ -351,11 +740,15 @@ ufs_find_partition(const char *want)
  	}
  	printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
  	return ENOENT;
@@ -480,7 +490,7 @@ index 6b926fe..acb7c78 100644
  	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
  	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
-@@ -385,6 +768,7 @@ ufs_take_over_host(void)
+@@ -385,6 +778,7 @@ ufs_take_over_host(void)
  		return EIO;
  	}
  	return 0;
@@ -488,7 +498,7 @@ index 6b926fe..acb7c78 100644
  }
  
  static int
-@@ -413,6 +797,30 @@ sweet_ufs_strategy(buf_t bp)
+@@ -413,6 +807,21 @@ sweet_ufs_strategy(buf_t bp)
  
  	bool rd = buf_flags(bp) & B_READ;
  
@@ -504,25 +514,102 @@ index 6b926fe..acb7c78 100644
 +			printf("UGG IO %u blk=0x%llx cnt=%u %s secsize=%u\n",
 +			    ugg_io_trace, (uint64_t)buf_blkno(bp), count,
 +			    rd ? "rd" : "wr", su.secsize);
-+			/*
-+			 * UGG: persist the first few I/Os at once. These are the ones the
-+			 * root mount issues, so the last one on the partition names the exact
-+			 * read the mount stopped at.
-+			 */
-+			{
-+				extern int sweet_log_try_flush(void);
-+				(void)sweet_log_try_flush();
-+			}
 +		}
 +	}
 +
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -583,6 +991,129 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+@@ -583,6 +992,222 @@ static const struct cdevsw sweet_ufs_cdevsw = {
  	.d_type       = D_DISK,
  };
  
++/*
++ * UGG: read the same bytes with both transfer shapes and compare.
++ *
++ * This is the decisive test for the HFS corruption that has resisted
++ * everything else. A freshly flashed image passes tools/check-hfs-root.py and
++ * still fails at /sbin/launchd with errno 5, and a read-only mount reproduces
++ * the same bad descriptors, so the bytes the driver returns to HFS do not
++ * match the bytes on the card.
++ *
++ * Neither transfer shape is trusted here: the point is that they are different
++ * code paths through the same controller. If the two disagree, at least one of
++ * them is broken, and where they first disagree says which kind of fault it is.
++ * If they agree, the read path is sound and the fault is downstream in HFS.
++ *
++ * Boot-arg ugcheck=3. Nothing is written.
++ */
++static void
++ugg_crosscheck(void)
++{
++	/* Three regions: the volume header, the last catalog extent the failure
++	 * names, and a plain slab in the middle of the partition. */
++	static const uint64_t regions[][2] = {
++		{ 0, 64 },              /* volume header / allocation blocks */
++		{ 1734912, 256 },       /* image block of catalog node 19174 (2 MiB) */
++		{ 1735170, 256 },       /* second half of the same extent */
++		{ 800000, 256 },        /* arbitrary middle-of-partition slab */
++	};
++
++	static uint8_t snap[BOUNCE_SIZE] __attribute__((aligned(64)));
++	uint8_t *a = (uint8_t *)(su.dma + DMA_BOUNCE);   /* the live bounce buffer */
++	uint8_t *b = snap;                               /* the multi-block copy */
++	int saved = ugg_no_multiblock;
++
++	printf("UGG XCHECK: comparing multi-block against single-sector reads\n");
++	for (unsigned r = 0; r < sizeof(regions) / sizeof(regions[0]); r++) {
++		uint64_t first = regions[r][0];
++		uint32_t count = (uint32_t)regions[r][1];
++		uint32_t bytes = count * UFS_BLOCK;
++
++		if (bytes > BOUNCE_SIZE) {
++			printf("UGG XCHECK: r%u region too large\n", r);
++			continue;
++		}
++		ugg_no_multiblock = 0;
++		if (ufs_read_blocks(su.first_block + first, count)) {
++			printf("UGG XCHECK: r%u multi-block read failed\n", r);
++			continue;
++		}
++		memcpy(b, a, bytes);
++
++		ugg_no_multiblock = 1;
++		if (ufs_read_blocks(su.first_block + first, count)) {
++			printf("UGG XCHECK: r%u single-sector read failed\n", r);
++			continue;
++		}
++
++		uint32_t diff = 0;
++		uint32_t first_diff = 0xffffffff;
++		for (uint32_t i = 0; i < bytes; i++) {
++			if (a[i] != b[i]) {
++				if (!diff) {
++					first_diff = i;
++				}
++				diff++;
++			}
++		}
++		if (!diff) {
++			printf("UGG XCHECK: r%u block %llu (%u KiB) identical\n",
++			    r, first, bytes >> 10);
++		} else {
++			printf("UGG XCHECK: r%u block %llu (%u KiB) DIFFERS in %u bytes, first at +0x%x\n",
++			    r, first, bytes >> 10, diff, first_diff);
++			printf("UGG XCHECK:   multi :");
++			for (int q = 0; q < 16; q++) {
++				printf(" %02x", b[(first_diff & ~15u) + (uint32_t)q]);
++			}
++			printf("\nUGG XCHECK:   single:");
++			for (int q = 0; q < 16; q++) {
++				printf(" %02x", a[(first_diff & ~15u) + (uint32_t)q]);
++			}
++			printf("\n");
++		}
++	}
++	ugg_no_multiblock = saved;
++}
++
 +/*
 + * UGG: read the HFS catalog b-tree back off the device and report which nodes
 + * have a broken descriptor.
@@ -538,12 +625,19 @@ index 6b926fe..acb7c78 100644
 + */
 +#define UGG_CK_MAXNODE 32768
 +
++static void ugg_crosscheck(void);
++
 +static void
 +ugg_check_btree(void)
 +{
 +	uint32_t mode = 1;
 +	PE_parse_boot_argn("ugcheck", &mode, sizeof(mode));
 +	if (!mode) {
++		return;
++	}
++	if (mode == 3) {
++		/* Transfer-shape comparison only; the b-tree walk below is not run. */
++		ugg_crosscheck();
 +		return;
 +	}
 +
@@ -649,7 +743,7 @@ index 6b926fe..acb7c78 100644
  static int
  sweet_ufs_init(void)
  {
-@@ -592,9 +1123,16 @@ sweet_ufs_init(void)
+@@ -592,9 +1217,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -666,14 +760,15 @@ index 6b926fe..acb7c78 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -606,8 +1144,17 @@ sweet_ufs_init(void)
+@@ -606,8 +1238,18 @@ sweet_ufs_init(void)
  	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
 +	{
-+		uint32_t nb = 0;
-+		PE_parse_boot_argn("uggnomb", &nb, sizeof(nb));
-+		ugg_no_multiblock = (nb != 0);
++		uint32_t nb = 1;
++		if (PE_parse_boot_argn("uggnomb", &nb, sizeof(nb))) {
++			ugg_no_multiblock = (nb != 0);
++		}
 +	}
  
 +#if defined(UGG_BOARD)
@@ -684,7 +779,7 @@ index 6b926fe..acb7c78 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1170,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1265,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -699,7 +794,7 @@ index 6b926fe..acb7c78 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1200,43 @@ sweet_ufs_init(void)
+@@ -651,15 +1295,43 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -746,7 +841,7 @@ index 6b926fe..acb7c78 100644
  	return 0;
  }
  
-@@ -669,7 +1246,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1341,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -755,7 +850,7 @@ index 6b926fe..acb7c78 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1255,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1350,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -764,7 +859,7 @@ index 6b926fe..acb7c78 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1313,118 @@ struct sweet_log_header {
+@@ -736,66 +1408,118 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -776,9 +871,7 @@ index 6b926fe..acb7c78 100644
 +/* First device block of the log area: just past the end of the partition. */
 +static uint64_t
 +sweet_log_base(void)
- {
--	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
--	uint64_t flushed = 0, seq = 0;
++{
 +	return su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +}
 +
@@ -801,7 +894,9 @@ index 6b926fe..acb7c78 100644
 + */
 +static int
 +sweet_log_write_locked(void)
-+{
+ {
+-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
 +	uint64_t base = sweet_log_base();
  	void *bounce = (void *)(su.dma + DMA_BOUNCE);
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
@@ -917,7 +1012,7 @@ index 6b926fe..acb7c78 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1434,102 @@ sweet_log_start(void)
+@@ -805,6 +1529,102 @@ sweet_log_start(void)
  	}
  }
  
@@ -1022,10 +1117,10 @@ index 6b926fe..acb7c78 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..21840de
+index 0000000..5546aa9
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,509 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
@@ -1116,6 +1211,15 @@ index 0000000..21840de
 +
 +#define PANEL_W         720
 +#define PANEL_H         1280
++
++/*
++ * PON discovery bounds. The PMIC PON slave is at a low channel number on every
++ * MSM8937 board seen so far; 64 is well past it. The time budget is the real
++ * guard: a bus with no clock makes each MMIO read hang, so the loop must be
++ * able to give up on wall time, not only on count.
++ */
++#define UGG_PON_SCAN        64
++#define UGG_PON_BUDGET_US   20000
 +
 +static vm_offset_t qup, gpio65, gpio85, spmi_core, spmi_obs;
 +static int pon_chan = -1;
@@ -1208,6 +1312,29 @@ index 0000000..21840de
 + * across a STOP, so this is two transfers: point at the register, then read
 + * from the pointer with a fresh start.
 + */
++/*
++ * Probe the QUP once, with a hard deadline, before trusting any read.
++ *
++ * qup_xfer() already gives each phase its own deadline, but a bus whose clock
++ * is gated can make the controller never raise ANY status bit, and the two
++ * waits then add up on a path that runs during startup. One bounded probe
++ * tells us whether the controller is alive at all.
++ */
++static int
++qup_alive(void)
++{
++	if (!qup) {
++		return 0;
++	}
++	uint64_t end = deadline_us(5000);
++	while (mach_absolute_time() < end) {
++		if (rd(qup, Q_STATE) & ST_VALID) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
 +static int
 +gt_read(uint16_t reg, uint8_t *buf, int n)
 +{
@@ -1437,7 +1564,15 @@ index 0000000..21840de
 +void
 +ugg_input_init(void)
 +{
-+	int enabled = 1;
++	/*
++	 * OFF unless ugginput=1. This runs at the tail of sweet_ufs_init(), and
++	 * its first act used to be 512 unbounded SPMI MMIO reads: with no bus
++	 * response that hangs the core and the APSS watchdog reboots the phone,
++	 * which looks exactly like dying before the root mount. Three rounds were
++	 * spent inside vfs_mountroot because of it. The digitiser can wait until
++	 * the desktop is up.
++	 */
++	int enabled = 0;
 +	thread_t thread;
 +
 +	if (input_started) {
@@ -1457,16 +1592,34 @@ index 0000000..21840de
 +		printf("UGG INPUT: MMIO mapping failed\n");
 +		return;
 +	}
-+	for (int i = 0; i < 512; i++) {
-+		if (((rd(spmi_core, 0x800 + 4u * (uint32_t)i) >> 8) & 0xfff) == 0x008) {
-+			pon_chan = i;
-+			break;
++	/*
++	 * Find the PON slave by PPID. The scan is bounded twice over: at most
++	 * UGG_PON_SCAN channels, and it gives up entirely after UGG_PON_BUDGET,
++	 * because a wedged SPMI bus makes every read hang and this runs on the
++	 * boot path.
++	 */
++	{
++		uint64_t end = deadline_us(UGG_PON_BUDGET_US);
++		int limit = UGG_PON_SCAN;
++		for (int i = 0; i < limit; i++) {
++			if (((rd(spmi_core, 0x800 + 4u * (uint32_t)i) >> 8) & 0xfff) == 0x008) {
++				pon_chan = i;
++				break;
++			}
++			if (mach_absolute_time() > end) {
++				printf("UGG INPUT: SPMI scan timed out at channel %d\n", i);
++				break;
++			}
 +		}
 +	}
 +	if (pon_chan >= 0) {
 +		spmi_obs = ml_io_map(SPMI_OBS_PA + 0x8000u * (uint32_t)pon_chan, 0x1000);
 +	}
 +	uint8_t pid[4] = {0};
++	if (!qup_alive()) {
++		printf("UGG INPUT: QUP3 does not respond; touch left disabled\n");
++		return;
++	}
 +	int e = gt_read(GT_REG_PRODUCT, pid, 4);
 +	printf("UGG INPUT: GT9xx product \"%c%c%c%c\" (err %d), PON chan %d, vol+ gpio85=%u\n",
 +	    pid[0] ? pid[0] : '?', pid[1] ? pid[1] : '?', pid[2] ? pid[2] : '?',
