@@ -222,49 +222,57 @@ ugg_emmc_check_userdata(void)
 
 	/*
 	 * HFS+ puts its volume header at offset 1024 of the volume, i.e. the
-	 * third 512-byte sector. mkfs.hfsplus -s makes it HFSX ("HX"), which is
-	 * what tools/mkiosroot.sh produces. But the earlier ugg attempts flashed a
-	 * raw HFS+ image (not the sparse one), and a raw image also starts at
-	 * offset 0 of the partition, so check both places and report both -- the
-	 * difference is exactly what decides the next fix.
+	 * third 512-byte sector. Read it into its own buffer: the shared one is
+	 * only one block wide and the comparisons below need both sectors.
+	 *
+	 * BYTE ORDER. The signature is the two bytes 'H' '+' (0x48 0x2B) read as
+	 * a big-endian 16-bit value at the start of the header. blk[] is a
+	 * little-endian uint32_t, so those two bytes appear as 0x2B48, NOT 0x482B
+	 * -- and 'HX' (0x48 0x58) as 0x5848. The first version of this check got
+	 * that wrong and reported "NOT HFS+" for a correct image.
 	 */
-	uint32_t sig1024 = 0, sig0 = s0;
-	if (sdhc_read(userdata_first + 2, blk) == 0) {
-		sig1024 = blk[0];
+	static uint32_t vh[128];
+	uint32_t sig1024 = 0;
+	if (sdhc_read(userdata_first + 2, vh) == 0) {
+		sig1024 = vh[0];
 	}
 
 	con_puts("USERDATA sig@0=");
-	con_hex(sig0, 8);
+	con_hex(s0, 8);
 	con_puts(" sig@1024=");
 	con_hex(sig1024, 8);
 	con_putc('\n');
 
 	/*
 	 * A sparse image that fastboot did NOT expand starts with the magic
-	 * 0xED26FF3A and is 28 bytes of header. If that is here, the partition
-	 * holds a raw sparse file rather than a filesystem, which is a completely
-	 * different failure from "blank".
+	 * 0xED26FF3A, which is written little endian (bytes 3A FF 26 ED), so a
+	 * little-endian uint32 read gives exactly 0xED26FF3A.
 	 */
-	if (s0 == 0xed26ff3a) {
+	if (s0 == 0xed26ff3au) {
 		con_puts("USERDATA SPARSE IMAGE NOT EXPANDED -- fastboot wrote the .simg header\n");
 		return;
 	}
 
-	uint32_t sig = (sig1024 == 0x482b || sig1024 == 0x4858) ? sig1024 : sig0;
-	const char *where = (sig == sig1024) ? "1024" : "0";
-
-	if (sig == 0x482b) {
-		con_puts("USERDATA HFS+ at ");
-		con_puts(where);
-		con_puts(" -- image present, use raw offset\n");
-	} else if (sig == 0x4858) {
-		con_puts("USERDATA HFSX at ");
-		con_puts(where);
-		con_puts(" -- image present\n");
+	if (sig1024 == 0x2b48u) {
+		con_puts("USERDATA HFS+ at 1024 -- image present\n");
+	} else if (sig1024 == 0x5848u) {
+		con_puts("USERDATA HFSX at 1024 -- image present, case sensitive\n");
+	} else if (s0 == 0x2b48u) {
+		con_puts("USERDATA HFS+ at 0 -- image present but at the wrong offset\n");
 	} else if (s0 == 0 && sig1024 == 0) {
 		con_puts("USERDATA BLANK -- nothing was flashed here\n");
 	} else {
-		con_puts("USERDATA NOT HFS+ -- wrong image, wrong offset, or incomplete flash\n");
+		/*
+		 * Neither signature matched. Dump enough of the 1024 sector to
+		 * identify what is actually there (an ext4/f2fs superblock, a
+		 * truncated write, ...) instead of only saying "no".
+		 */
+		con_puts("USERDATA NOT HFS+ -- vh words:");
+		for (int i = 0; i < 8; i++) {
+			con_putc(' ');
+			con_hex(vh[i], 8);
+		}
+		con_putc('\n');
 	}
 }
 
