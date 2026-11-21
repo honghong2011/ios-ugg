@@ -1,6 +1,108 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-15 22:30，第 30 轮）-- 32bpp 控制台完全清晰；卡点锁定为「userdata 上没有 iOS 文件系统」
+## ★★★★★ 最新（2026-11-21 10:40，第 31 轮）-- 刷了根镜像后行为不变；改用 shim 直接验卷头
+
+### 实机结果：刷完 userdata 后，表现和没刷**完全一样**
+
+用户已用 `fastboot` 把 `ios16-root.simg` 刷进 userdata（合并 + 刷写完成），
+然后启动 `shim-boot-0085-errno.img`。结果：色带闪过 -> 黑屏跑码 -> 重启。
+
+### 照片的真正读法：图一右半边才是最新画面
+
+图一左侧那半（`ether_family_init` / `net_init_run` / `inittodr` / `setconf` /
+`UGG EMMC`）是**上一轮的残留**——`vc` 控制台光标位置保留，两轮启动叠在同一块屏上。
+
+右侧那半（顺序与 `bsd_init.c` 完全一致）才是本轮：
+
+```
+dlil_init -> socketinit -> domaininit -> skywalk_init
+-> memorystatus_init -> sysctl_mib_init -> bsd_autoconf -> loopattach
+-> ifnet_attach: All kernel threads created for ...
+```
+
+源码核对（`bsd_init.c`）：759 dlil / 763 socket / 765 domain / 773 skywalk /
+795 memorystatus / 799 sysctl_mib / 802 autoconf / 816 loopattach /
+831 ether_family / 866 net_init_run / 870 inittodr / **877 setconf**。
+
+**关键：`setconf` 那行没出现。** 说明现在不是「`vfs_mountroot` 返回错误然后循环」，
+而是它**在 `vfs_mountroot()` 里面就不返回了**（挂住），所以既没有 `UGG ROOT FAIL`
+也没有循环滚动。这和上一个分叉点完全不同。
+
+### 为什么不再靠 errno 猜
+
+`UGG ROOT FAIL` 是正确的代码（内核里确实有，`grep` 到 1 次），
+但它**只有在 `vfs_mountroot` 返回失败时才打印**。现在卡在里面不出来，
+等于这条诊断路走不通。继续猜 errno 没有意义。
+
+### 本轮做法：让 shim 在跳转前直接读 userdata 的卷头
+
+`shim/emmc.c` 新增 `ugg_emmc_check_userdata()`：在 GPT 解析完、跳内核之前，
+直接 `sdhc_read()` userdata 的扇区，判断镜像到底在不在、是什么。
+
+读两个位置，因为两种刷法都可能：
+
+| 位置 | 判断 |
+|---|---|
+| 偏移 0（扇区 0） | 原始镜像从这里开始；`0xED26FF3A` = **sparse 头没被展开** |
+| 偏移 1024（扇区 +2） | HFS+ 卷头标准位置；`0x482B`=HFS+，`0x4858`=HFSX（大小写敏感，mkiosroot.sh 产出的就是这个） |
+
+输出示例：
+
+```
+USERDATA F=1376256 N=111132672
+USERDATA s0=00000000 00000000
+USERDATA sig@0=00000000 sig@1024=00000000
+USERDATA BLANK -- nothing was flashed here
+```
+
+或
+
+```
+USERDATA sig@0=00000000 sig@1024=00004858
+USERDATA HFSX at 1024 -- image present
+```
+
+或（**最可疑的一种**）
+
+```
+USERDATA s0=ED26FF3A 0000001C
+USERDATA SPARSE IMAGE NOT EXPANDED -- fastboot wrote the .simg header
+```
+
+三种结果对应三种完全不同的修法，一张照片就能定性。
+
+### 为什么要专门查 sparse 头
+
+用户刷的是 `.simg`（Android sparse image）。`fastboot flash` 正常情况下会展开它，
+但**如果镜像头不被接受，或有地方把文件原样写进去**，分区里躺着的是
+28 字节头的 sparse 文件而不是文件系统。那时 `vfs_mountroot` 会读到乱数据，
+既不返回干净的错误、也不 panic —— 和现在「卡住」的现象吻合。
+
+读路径本身已被证明可用（`SWEET UFS: userdata ... read-write, DMA`），
+所以这个检查是可信的。
+
+### 只读，不会写任何东西
+
+`ugg_emmc_check_userdata()` 全程只调 `sdhc_read()`，没有任何写路径。
+写权限窗口仍然只在 `cache` 分区内（`sdhc_allow_writes`）。
+
+### 产物
+
+| 文件 | 内容 | sha256 |
+|---|---|---|
+| `shim-boot-0086-userdata.img` | 跳转前打印 userdata 卷头判定 | `2b210f305169d4c88b486e8fb27d6a5c79f4a6394e57dd3a7d39027091d5d8aa` |
+
+shim 来源 CI `44856815790`（success, commit `f2c0451`），
+Image sha256 `f9ea479a2ad7807c7633a807c8fffd69ee7cad8ba10bc55aa44ad9e30cc15738`。
+
+### 下一张照片要看的三行
+
+1. `USERDATA s0=` —— 分区开头是什么
+2. `USERDATA sig@0= / sig@1024=` —— 有没有 HFS+ 魔数
+3. 结尾那句判定（`BLANK` / `HFSX at 1024` / `SPARSE IMAGE NOT EXPANDED` / `NOT HFS+`）
+
+
+## ★★★★★ （2026-11-15 22:30，第 30 轮）-- 32bpp 控制台完全清晰；卡点锁定为「userdata 上没有 iOS 文件系统」
 
 ### 实机：屏幕终于可读，而且信息量很大
 
