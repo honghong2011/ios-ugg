@@ -221,18 +221,37 @@ ugg_emmc_check_userdata(void)
 	con_putc('\n');
 
 	/*
-	 * HFS+ puts its volume header at offset 1024 of the volume, i.e. the
-	 * third 512-byte sector. Read it into its own buffer: the shared one is
-	 * only one block wide and the comparisons below need both sectors.
+	 * Trimmed signature match.
 	 *
-	 * BYTE ORDER. The signature is the two bytes 'H' '+' (0x48 0x2B) read as
-	 * a big-endian 16-bit value at the start of the header. blk[] is a
-	 * little-endian uint32_t, so those two bytes appear as 0x2B48, NOT 0x482B
-	 * -- and 'HX' (0x48 0x58) as 0x5848. The first version of this check got
-	 * that wrong and reported "NOT HFS+" for a correct image.
+	 * The HFS+ volume header begins with a 16-bit signature: 'H' '+' = 0x482B
+	 * (HFS+) or 'H' 'X' = 0x4858 (HFSX, what mkfs.hfsplus -s makes), followed
+	 * by a 16-bit version (4 or 5). Read little endian as a uint32_t that is
+	 * 0x00042B48 / 0x00052B48 / 0x00054858, so the signature is the LOW half
+	 * and the version the HIGH half.
+	 *
+	 * Two earlier versions of this function got this wrong: first comparing
+	 * against 0x482B (never matches little endian), then comparing the whole
+	 * word against 0x2B48 (fails whenever the version half is non-zero). Both
+	 * produced a false "NOT HFS+". Mask the low 16 bits and be done with it.
 	 */
+#define HFS_SIG(word)   ((uint32_t)(word) & 0xffffu)
+#define HFS_VER(word)   ((uint32_t)(word) >> 16)
+#define HFS_MAGIC_PLUS  0x2b48u         /* 'H' '+' little endian */
+#define HFS_MAGIC_X     0x5848u         /* 'H' 'X' little endian */
+
 	static uint32_t vh[128];
 	uint32_t sig1024 = 0;
+
+	/*
+	 * A sparse image that fastboot did NOT expand starts with the magic
+	 * 0xED26FF3A, written little endian, so a little-endian uint32 read gives
+	 * exactly that value.
+	 */
+	if (s0 == 0xed26ff3au) {
+		con_puts("USERDATA SPARSE IMAGE NOT EXPANDED -- fastboot wrote the .simg header\n");
+		return;
+	}
+
 	if (sdhc_read(userdata_first + 2, vh) == 0) {
 		sig1024 = vh[0];
 	}
@@ -243,37 +262,95 @@ ugg_emmc_check_userdata(void)
 	con_hex(sig1024, 8);
 	con_putc('\n');
 
-	/*
-	 * A sparse image that fastboot did NOT expand starts with the magic
-	 * 0xED26FF3A, which is written little endian (bytes 3A FF 26 ED), so a
-	 * little-endian uint32 read gives exactly 0xED26FF3A.
-	 */
-	if (s0 == 0xed26ff3au) {
-		con_puts("USERDATA SPARSE IMAGE NOT EXPANDED -- fastboot wrote the .simg header\n");
+	if (HFS_SIG(sig1024) == HFS_MAGIC_PLUS) {
+		con_puts("USERDATA HFS+ at 1024 ver=");
+		con_dec(HFS_VER(sig1024));
+		con_puts(" -- image present\n");
+		return;
+	}
+	if (HFS_SIG(sig1024) == HFS_MAGIC_X) {
+		con_puts("USERDATA HFSX at 1024 ver=");
+		con_dec(HFS_VER(sig1024));
+		con_puts(" -- image present\n");
+		return;
+	}
+	if (HFS_SIG(s0) == HFS_MAGIC_PLUS || HFS_SIG(s0) == HFS_MAGIC_X) {
+		con_puts("USERDATA signature at 0 -- image present but at the wrong offset\n");
+		return;
+	}
+	if (s0 == 0 && sig1024 == 0) {
+		con_puts("USERDATA BLANK -- nothing was flashed here\n");
 		return;
 	}
 
-	if (sig1024 == 0x2b48u) {
-		con_puts("USERDATA HFS+ at 1024 -- image present\n");
-	} else if (sig1024 == 0x5848u) {
-		con_puts("USERDATA HFSX at 1024 -- image present, case sensitive\n");
-	} else if (s0 == 0x2b48u) {
-		con_puts("USERDATA HFS+ at 0 -- image present but at the wrong offset\n");
-	} else if (s0 == 0 && sig1024 == 0) {
-		con_puts("USERDATA BLANK -- nothing was flashed here\n");
-	} else {
-		/*
-		 * Neither signature matched. Dump enough of the 1024 sector to
-		 * identify what is actually there (an ext4/f2fs superblock, a
-		 * truncated write, ...) instead of only saying "no".
-		 */
-		con_puts("USERDATA NOT HFS+ -- vh words:");
-		for (int i = 0; i < 8; i++) {
+	/*
+	 * Nothing valid where the header belongs. Identify what IS there.
+	 *
+	 * A bare signature is not enough to call it a volume header: the 16-bit
+	 * version that follows must be 4 (HFS+) or 5 (HFSX). The 0087 run showed
+	 * bytes 48 2B at +1028 with version 0x4C78, i.e. the signature alone would
+	 * have matched while the header cannot possibly be valid -- a coincidence,
+	 * not a filesystem. So every candidate is checked for a sane version.
+	 */
+	int found = 0;
+	for (uint32_t sec = 0; sec < 64 && !found; sec++) {
+		if (sdhc_read(userdata_first + sec, vh)) {
+			break;
+		}
+		for (int w = 0; w < 127; w++) {
+			uint32_t sig = HFS_SIG(vh[w]);
+			uint32_t ver = HFS_VER(vh[w]);
+			if ((sig == HFS_MAGIC_PLUS && ver == 4) ||
+			    (sig == HFS_MAGIC_X && ver == 5)) {
+				con_puts("USERDATA VALID ");
+				con_puts(sig == HFS_MAGIC_X ? "HFSX" : "HFS+");
+				con_puts(" at byte ");
+				con_dec((uint64_t)sec * 512u + (uint64_t)w * 4u);
+				con_putc('\n');
+				found = 1;
+				break;
+			}
+		}
+	}
+	if (found) {
+		return;
+	}
+
+	/*
+	 * Still nothing. Say what the two decisive places actually contain, and
+	 * check the three filesystems that could plausibly be sitting here
+	 * instead: ext4/f2fs (Android leftovers) and an unexpanded sparse image.
+	 *
+	 * The byte dump is printed as four 32-bit words, so a reader can decode
+	 * any of them by hand without another round trip.
+	 */
+	if (sdhc_read(userdata_first, vh) == 0) {
+		con_puts("USERDATA b0:");
+		for (int i = 0; i < 4; i++) {
 			con_putc(' ');
 			con_hex(vh[i], 8);
 		}
 		con_putc('\n');
 	}
+	if (sdhc_read(userdata_first + 2, vh) == 0) {
+		con_puts("USERDATA b1024:");
+		for (int i = 0; i < 4; i++) {
+			con_putc(' ');
+			con_hex(vh[i], 8);
+		}
+		con_putc('\n');
+
+		/* ext4 magic 0xEF53 lives at offset 1024 + 56; f2fs magic right at 1024. */
+		if (vh[0] == 0x1020f5f2u) {              /* f2fs superblock, magic 0xF2F52010 LE */
+			con_puts("USERDATA f2fs -- Android userdata still here\n");
+			return;
+		}
+		if ((vh[14] & 0xffffu) == 0xef53u) {     /* ext4 s_magic at +56 */
+			con_puts("USERDATA ext4 -- Android userdata still here\n");
+			return;
+		}
+	}
+	con_puts("USERDATA NO FILESYSTEM -- the image is not on this partition\n");
 }
 
 void
