@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..834ecb9 100644
+index 6b926fe..5153260 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,360 @@ static struct {
@@ -576,10 +576,49 @@ index 6b926fe..834ecb9 100644
  	return 0;
  }
  
-@@ -805,6 +1225,24 @@ sweet_log_start(void)
+@@ -805,6 +1225,63 @@ sweet_log_start(void)
  	}
  }
  
++/*
++ * Flush the console ring to the last blocks of the partition, synchronously.
++ *
++ * Used on the "cannot mount root" path, where the system is about to panic and
++ * the log thread (if it ran at all) has no chance to run. Doing it inline means
++ * the reason for the failure is on the partition for a recovery to read, even
++ * though the screen could not show it.
++ */
++void
++sweet_ufs_flush_log_now(void)
++{
++	if (!su.ready || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
++		return;
++	}
++	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	uint64_t size = (total < SWEET_LOG_SIZE) ? total : SWEET_LOG_SIZE;
++
++	lck_mtx_lock(&sweet_ufs_lock);
++	for (uint64_t pos = 0; pos < size; pos += BOUNCE_SIZE) {
++		uint32_t n = (uint32_t)MIN((uint64_t)BOUNCE_SIZE,
++		    ((size - pos) + UFS_BLOCK - 1) / UFS_BLOCK * UFS_BLOCK);
++		memcpy(bounce, sweet_log_ring + pos, n);
++		if (ufs_write_blocks(base + 1 + pos / UFS_BLOCK, n / UFS_BLOCK)) {
++			break;
++		}
++	}
++	struct sweet_log_header h = {
++		.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++		.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = 0xffffffffu,
++	};
++	bzero(bounce, UFS_BLOCK);
++	memcpy(bounce, &h, sizeof(h));
++	(void)ufs_write_blocks(base, 1);
++	(void)ufs_sync_cache();
++	lck_mtx_unlock(&sweet_ufs_lock);
++}
++
 +/*
 + * Start the persistent console log once the root filesystem is mounted.
 + *
@@ -1059,7 +1098,7 @@ index 0000000..21840de
 +}
 +#endif /* UGG_BOARD */
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..448a433 100644
+index bb2a2bf..46fc864 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -492,7 +492,9 @@ bsd_init(void)
@@ -1073,7 +1112,7 @@ index bb2a2bf..448a433 100644
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
  #else
  #define bsd_init_kprintf(x, ...)
-@@ -897,10 +899,40 @@ bsd_init(void)
+@@ -897,10 +899,49 @@ bsd_init(void)
  		}
  #endif
  		printf("cannot mount root, errno = %d\n", err);
@@ -1091,6 +1130,15 @@ index bb2a2bf..448a433 100644
 +		 */
 +		printf("UGG ROOT FAIL: rootdevice=\"%s\" errno=%d args=\"%s\"\n",
 +		    rootdevice, err, PE_boot_args());
++		/*
++		 * Save the console to the end of userdata before dying, so a recovery
++		 * can read WHY this failed without depending on the screen or on the
++		 * delayed log thread. tools/sweet-log.py decodes it.
++		 */
++		{
++			extern void sweet_ufs_flush_log_now(void);
++			sweet_ufs_flush_log_now();
++		}
 +		panic("UGG: no root filesystem on %s (errno %d)", rootdevice, err);
 +#endif
  	}
