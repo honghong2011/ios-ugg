@@ -28,6 +28,8 @@ extern uintptr_t con_log_phys(void);
 static uint32_t blk[128];
 static uint64_t cache_first;
 static uint64_t cache_sectors;
+static uint64_t userdata_first;
+static uint64_t userdata_sectors;
 static int      write_ok;
 static int      emmc_code;
 
@@ -90,6 +92,8 @@ gpt_walk(void)
 			con_dec(last - first + 1);
 			con_putc('\n');
 		} else if (name_eq(ent, "userdata")) {
+			userdata_first = first;
+			userdata_sectors = last - first + 1;
 			con_puts("GPT userdat F=");
 			con_dec(first);
 			con_puts(" N=");
@@ -169,6 +173,101 @@ ugg_emmc_flush_log(void)
 	}
 }
 
+
+/*
+ * Read the first sector of "userdata" and say whether it holds an HFS+ volume
+ * header.
+ *
+ * This answers the question the kernel cannot: XNU only reports an errno from
+ * vfs_mountroot(), and the boot-loop scrolled it away every time. The shim can
+ * read the same bytes the kernel will read, before the kernel exists, and say
+ * plainly whether the image that was flashed is actually there.
+ *
+ * An HFS+ volume header lives at offset 1024 of the volume, so it is the
+ * third 512-byte sector, and it starts with the signature 'H+' (0x482B) or,
+ * for HFSX (case sensitive), 'HX' (0x4858). The iOS root built by mkiosroot.sh
+ * is created with mkfs.hfsplus -s, i.e. HFSX, so 'HX' is the expected value.
+ *
+ * Reads only. Nothing here can write.
+ */
+void
+ugg_emmc_check_userdata(void)
+{
+	if (userdata_first == 0 || userdata_sectors == 0) {
+		con_puts("USERDATA MISSING\n");
+		return;
+	}
+	con_puts("USERDATA F=");
+	con_dec(userdata_first);
+	con_puts(" N=");
+	con_dec(userdata_sectors);
+	con_putc('\n');
+
+	/*
+	 * Sector 0 first: it tells "blank" from "some other filesystem" from
+	 * "the HFS+ header is here but at offset 0". Read it before anything
+	 * else clobbers the shared block buffer.
+	 */
+	if (sdhc_read(userdata_first, blk)) {
+		con_puts("USERDATA READ FAILED\n");
+		return;
+	}
+	uint32_t s0 = blk[0];
+	uint32_t s0_1 = blk[1];
+	con_puts("USERDATA s0=");
+	con_hex(s0, 8);
+	con_puts(" ");
+	con_hex(s0_1, 8);
+	con_putc('\n');
+
+	/*
+	 * HFS+ puts its volume header at offset 1024 of the volume, i.e. the
+	 * third 512-byte sector. mkfs.hfsplus -s makes it HFSX ("HX"), which is
+	 * what tools/mkiosroot.sh produces. But the earlier ugg attempts flashed a
+	 * raw HFS+ image (not the sparse one), and a raw image also starts at
+	 * offset 0 of the partition, so check both places and report both -- the
+	 * difference is exactly what decides the next fix.
+	 */
+	uint32_t sig1024 = 0, sig0 = s0;
+	if (sdhc_read(userdata_first + 2, blk) == 0) {
+		sig1024 = blk[0];
+	}
+
+	con_puts("USERDATA sig@0=");
+	con_hex(sig0, 8);
+	con_puts(" sig@1024=");
+	con_hex(sig1024, 8);
+	con_putc('\n');
+
+	/*
+	 * A sparse image that fastboot did NOT expand starts with the magic
+	 * 0xED26FF3A and is 28 bytes of header. If that is here, the partition
+	 * holds a raw sparse file rather than a filesystem, which is a completely
+	 * different failure from "blank".
+	 */
+	if (s0 == 0xed26ff3a) {
+		con_puts("USERDATA SPARSE IMAGE NOT EXPANDED -- fastboot wrote the .simg header\n");
+		return;
+	}
+
+	uint32_t sig = (sig1024 == 0x482b || sig1024 == 0x4858) ? sig1024 : sig0;
+	const char *where = (sig == sig1024) ? "1024" : "0";
+
+	if (sig == 0x482b) {
+		con_puts("USERDATA HFS+ at ");
+		con_puts(where);
+		con_puts(" -- image present, use raw offset\n");
+	} else if (sig == 0x4858) {
+		con_puts("USERDATA HFSX at ");
+		con_puts(where);
+		con_puts(" -- image present\n");
+	} else if (s0 == 0 && sig1024 == 0) {
+		con_puts("USERDATA BLANK -- nothing was flashed here\n");
+	} else {
+		con_puts("USERDATA NOT HFS+ -- wrong image, wrong offset, or incomplete flash\n");
+	}
+}
+
 void
 ugg_emmc_probe(void)
 {
@@ -198,5 +297,11 @@ ugg_emmc_probe(void)
 		return;
 	}
 	gpt_walk();
+	/*
+	 * Prove what is actually on userdata before the kernel tries to mount it.
+	 * A photograph of this decides whether the next step is "flash the image"
+	 * or "the image is there and something else is wrong".
+	 */
+	ugg_emmc_check_userdata();
 	ugg_emmc_flush_log();
 }

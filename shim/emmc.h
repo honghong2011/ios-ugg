@@ -20,3 +20,12 @@ void ugg_emmc_probe(void);
  * No-op when there is no writable "cache" partition.
  */
 void ugg_emmc_flush_log(void);
+
+/*
+ * Read the first sectors of the "userdata" partition and report whether they
+ * hold an HFS+ / HFSX volume header. Read-only; it exists so a photograph can
+ * prove the iOS root image is really on the partition, which the kernel's
+ * vfs_mountroot errno never managed to show before the boot loop scrolled it
+ * away.
+ */
+void ugg_emmc_check_userdata(void);
