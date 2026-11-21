@@ -1,6 +1,79 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-21 17:40，第 34 轮）-- 修掉“日志取不到”的三个真因
+## ★★★★★ 最新（2026-11-21 18:00，第 35 轮）-- 0091 拿到了真日志，但它有个结构性上限
+
+### 实机结果：日志是真的，偏移也对
+
+`kernel-console.txt` 共 184 行，从 `Darwin Kernel Version 22.6.0` 一路到：
+
+```
+bsd_init: calling setconf
+UGG EMMC: userdata first=1376256 nblocks=13891579 (54263 MiB)
+SWEET UFS: "userdata" on LUN 0: first block 0x150000, 54263 MiB, read-write, DMA at 0xa24f0000
+```
+
+然后再无下文。**这本身已经证明三件事**：
+
+1. 偏移公式修对了（否则又是 4 MiB 零）；
+2. eMMC **写**路径完全可用 —— 内核能写进 userdata 末尾；
+3. 日志机制（ring + header + 解码）端到端跑通。
+
+### 但这份 dump 有个结构性上限：它必然停在同一行
+
+`SWEET UFS: ...` 是 `sweet_ufs_init()` 最后一句 printf，紧接着就是 init 里的同步 flush。
+header 里的 `total` 是**写的那一刻**的值，所以：
+
+> 之后无论打印什么，都只留在内存 ring 里；磁盘上那份永远停在 `SWEET UFS: ...`。
+
+因此「dump 停在那一行」**不能**证明「卡在那一行」。它只说明：**之后再也没有第二次 flush**。
+
+### 为什么没有第二次 flush —— 两个可能
+
+- **(a) 硬卡死**：默认周期是 10 秒，而 0091 的 cmdline 没有 `ufslogsecs`。
+  如果机器在 10 秒内死掉/锁死（单核 `cpus=1`），日志线程没机会跑。
+- **(b) 我自己埋的阻塞**：挂载失败会走 `UGG ROOT FAIL`，然后我在 panic 前调了
+  **阻塞版** `sweet_ufs_flush_log_now()`（`lck_mtx_lock`）。如果失败的挂载把
+  `sweet_ufs_lock` 漏掉没释放，这一步**永久阻塞** —— 屏幕上明明打了
+  `UGG ROOT FAIL ... errno=N`，磁盘上一个字节都没有，**和 0091 的现像完全吻合**。
+
+第 0088/0090 轮是能看到 `cannot mount root` 反复重试的（说明挂载确实返回错误、
+机器当时是活的），所以 **(b) 的嫌疑比 (a) 大**。
+
+### 本轮改动（commit `a48ce38`，CI `44891665770`）
+
+目标：让「最后一次成功写盘」精确指认卡点，不再依赖周期线程。
+
+1. `sweet_log_write_locked()`：把「写 ring + 写 header + sync cache」抽成一个函数，
+   记录 `sweet_log_written`，同步路径与线程共用。
+2. `sweet_log_step(tag)`：printf + **try-lock** flush。信标本体永不阻塞，
+   不会自己制造卡死；抢不到锁就只打印 `[device busy, deferred]`。
+3. 布点（每点都会立刻落盘）：
+   - `IOFindBSDRoot`：`ufs root device ready`
+   - `setconf` 返回：`root device resolved`
+   - `vfs_mountroot` 进入：`enter`
+   - `bdevvp` 之后：`bdevvp ready`
+   - 每个 fs 挂载**之前**：`before filesystem mount` + `SWEET MOUNT: trying hfs`
+   - 挂载**之后**：`SWEET MOUNT: hfs returned <errno> (flags 0x..)` + `mount failed/ok`
+   - `strategy()` 前 12 次 I/O：每次立刻 flush（`UGG IO n ...` 落盘）
+4. `panic_trap_to_debugger()`：panic 文案进 console 之后**尽力 flush 一次**。
+   这台手机自己重启不了，不 flush 等于 panic 信息全丢。
+5. 失败路径的阻塞 flush → 改成 `sweet_log_try_flush()`，panic hook 再试一次。
+6. 日志周期默认 10 秒 → **3 秒**。
+
+### 下次刷完应该看到什么（按顺序）
+
+`SWEET STEP: IOFindBSDRoot...` → `setconf...` → `vfs_mountroot: enter` →
+`bdevvp ready` → `SWEET MOUNT: trying hfs` → `UGG IO 1..N`，然后三种结局：
+
+| 现象 | 结论 |
+|---|---|
+| `SWEET MOUNT: hfs returned 0` + `root mounted` | 挂上了，进入 VFS_ROOT 阶段 |
+| `SWEET MOUNT: hfs returned <errno>` | **这就是一直没拿到的 errno** |
+| 最后一条是 `UGG IO n` | 卡在 HFS 的读里面，n 说明读到第几块 |
+
+---
+
+## （2026-11-21 17:40，第 34 轮）-- 修掉“日志取不到”的三个真因
 
 ### 实机结果：取回来的 4 MiB 全是 0
 
