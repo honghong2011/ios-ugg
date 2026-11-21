@@ -1,6 +1,119 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-21 11:00，第 32 轮）-- 找到并修掉自己写的字节序 bug
+## ★★★★★ 最新（2026-11-21 12:20，第 33 轮）-- 修掉挂载的真凶：日志线程抢锁 + shim 写超时
+
+### 本轮修的两个实质 bug
+
+**1. 日志线程和根挂载抢同一把锁（最可能是卡死的主因）**
+
+`sweet_ufs.c` 的 `sweet_ufs_init()` 里，分区识别完成后**立刻**调 `sweet_log_start()`。
+那个线程每 10 秒拿 `sweet_ufs_lock`，并在持锁期间**写最多 4 MiB**。
+
+而整个块设备只有**一把锁、一条轮询传输路径**：
+
+```c
+lck_mtx_lock(&sweet_ufs_lock);   /* sweet_ufs_strategy 里 */
+    ... ufs_read_blocks / ufs_write_blocks ...
+lck_mtx_unlock(&sweet_ufs_lock);
+```
+
+根挂载紧接着 `init` 之后开始，几乎必然撞上日志线程。写慢或写失败时
+**锁一直被占着**，挂载就表现为「卡在 setconf 之后、什么都不打印」。
+
+修法：把 `sweet_log_start()` 从 `sweet_ufs_init()` 里拿掉，改成挂载成功后调用
+`sweet_ufs_log_after_mount()`（`bsd_init.c` 里 `vfs_mountroot` 成功后）。
+
+**2. shim 从来没设置 SDHCI 数据超时计数器**
+
+内核侧 `ugg_take_over()` 一直有这句：
+
+```c
+mh_wr(M_CLK, (mh_rd(M_CLK) & ~(0xfu << 16)) | (0xeu << 16));   /* 0xE = TMCLK x 2^27 */
+```
+
+**shim 侧没有。** 复位默认值是 0，控制器会在卡片还在编程时就把命令判失败 ——
+这正是 `LOG WRITE E=5 SEC=0`（错误码 5 = data error）的根因：
+数据已经被接受，写编程阶段被提前中止。
+
+修法：`shim/sdhc.c` 新增 `set_data_timeout_max()`，在 `sdhc_init()` 卡片进入
+transfer state 后调用；`sdhc_write()` 同时改成**3 次重试 + 复位线路**，
+与内核 `ugg_xfer()` 的策略一致。
+
+### 修完后内核能写 eMMC，这会带来什么
+
+HFS+ 挂载成功之后立刻要做三件**写操作**（mido 日志 497-501 行实测）：
+
+```
+hfs: Initializing the journal (joffset 0x82000 sz 0x800000)
+hfs: iOSRoot: hfs_recording_init: creating the hotfile btree
+```
+
+日志重放和 hotfile 创建都要写盘。**写路径不通，挂载一定失败或卡死。**
+
+### 当前能力对照（vs mido）
+
+| 能力 | mido | UGG | 状态 |
+|---|---|---|---|
+| eMMC 读 | UFS | SDHCI 读通，54 GB 识别对 | ✅ |
+| eMMC 写 | UFS | 内核侧已做；**shim 本轮补齐** | ✅ 本轮 |
+| 16 KB VM 页 | 默认（>1 GB） | `memSize=1.499 GiB` 走同一分支 | ✅ |
+| commpage 对齐 | `PAGE_RATIO` 修正 | `pmap.c:10896` 已有同款 | ✅ |
+| dyld 共享缓存签名 | 需 16 KB 页 | 靠 16 KB 页满足 | ✅ |
+| 根挂载 | rd=ufsroot0 | 驱动通了，**锁冲突本轮修** | ✅ 本轮 |
+| 显示呈现 | AppleCLCD CPU 缩放 | `presented as 750x1334`（iPhone 8 原生） | ✅ |
+| 触摸 | SweetHIDTouch | `BOARD_TOUCH_RAIL=0` 未启用 | ⏳ 进桌面后 |
+
+### 本轮新增诊断（只打前 12 次，不刷屏）
+
+`sweet_ufs_strategy()` 会打印每一次块 I/O：
+
+```
+UGG IO 1 blk=0x0 cnt=512 rd secsize=512
+UGG IO 2 blk=0x2 cnt=512 rd secsize=512
+```
+
+这两行能直接回答：挂载有没有读到第一个块、`secsize` 是多少、卡在哪个块。
+
+### 日志怎么取（TWRP + ADB，不需要改代码）
+
+内核把控制台日志写在 **userdata 的最后 4 MiB + 4 KiB**，这本来就是为
+「屏幕拍不清」准备的，**不依赖任何写权限修复**。
+
+TWRP 里：
+
+```bash
+# 1. 找 userdata 的起始扇区和大小（512 字节扇区）
+adb shell fdisk -l /dev/block/mmcblk0
+
+# 2. 算出最后 1025 个 4K 块的位置：
+#    start_4k = userdata_start_512 / 8
+#    total_4k = userdata_size_512 / 8
+#    skip     = start_4k + total_4k - 1025
+adb shell dd if=/dev/block/mmcblk0 bs=4096 skip=<skip> count=1025 of=/sdcard/sweetlog.bin
+
+# 3. 拉出来
+adb pull /sdcard/sweetlog.bin
+```
+
+然后本地解码（仓库里就有工具）：
+
+```bash
+python tools/sweet-log.py sweetlog.bin out.txt
+```
+
+**或者更快的方式**：TWRP 挂载后，直接 `adb pull` 整个分区末尾：
+
+```bash
+adb shell "dd if=/dev/block/bootdevice/by-name/userdata bs=4096 skip=$(( $(blockdev --getsz /dev/block/bootdevice/by-name/userdata) / 8 - 1025 )) count=1025 of=/sdcard/sweetlog.bin"
+adb pull /sdcard/sweetlog.bin
+```
+
+### 产物
+
+（编译中，CI run `44864074728`）
+
+
+## ★★★★★ （2026-11-21 11:00，第 32 轮）-- 找到并修掉自己写的字节序 bug
 
 ### 上一轮 `USERDATA NOT HFS+` 是假阴性，是我的 bug
 

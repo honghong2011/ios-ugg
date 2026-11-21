@@ -225,6 +225,22 @@ static void core_reset(void)
 	con_puts(" PWRREQ="); con_hex(pwr_irq_service(20), 2); con_putc('\n');
 }
 
+/*
+ * Data timeout counter, R_CLK[19:16], to the maximum (0xE = TMCLK * 2^27).
+ *
+ * The reset value is 0, which lets the controller abort a command while the
+ * card is still programming a block. That is what the cache-partition log
+ * writes were failing with: an error code 5 ("data error") at sector 0, on
+ * writes whose data had already been accepted. The kernel side has always done
+ * this in ugg_take_over(); the shim did not, which is why only the kernel could
+ * write to the eMMC.
+ */
+static void
+set_data_timeout_max(void)
+{
+	wr(R_CLK, (rd(R_CLK) & ~(0xfu << 16)) | (0xeu << 16));
+}
+
 int sdhc_init(void)
 {
 	regulator_diag();
@@ -287,10 +303,16 @@ int sdhc_init(void)
 			con_puts(" ST="); con_dec(st < 0 ? 100 - st : st);
 		}
 		con_putc('\n');
-		if (st == 4)
+		if (st == 4) {
+			set_data_timeout_max();
 			return 0;
+		}
 	}
-	return full_reinit();
+	int e = full_reinit();
+	if (!e) {
+		set_data_timeout_max();
+	}
+	return e;
 }
 
 /* ---- full re-identification at safe speed (legacy timing, 1-bit bus) ---- */
@@ -430,16 +452,37 @@ int sdhc_write(uint64_t lba, const void *buf)
 {
 	if (lba < wr_lo || lba >= wr_hi)
 		return 99;                                         /* outside allowed window */
-	int e = cmd(24, (uint32_t)lba, RSP_R1, 1, (uint32_t *)buf);
-	if (e)
-		return e;
-	uint64_t end = ticks() + 19200ULL * 1000;              /* wait for programming */
-	while (ticks() < end) {
-		int st = card_state();
-		if (st == 4 && (last_resp & (1U << 8)))
+	/*
+	 * Retry like the kernel does (sweet_ufs.c ugg_xfer): a failed chunk is
+	 * recovered and re-sent, because write-busy timeouts are transient once the
+	 * data timeout counter is at its maximum.
+	 */
+	int e = 0;
+	for (int attempt = 0; attempt < 3; attempt++) {
+		e = cmd(24, (uint32_t)lba, RSP_R1, 1, (uint32_t *)buf);
+		if (e) {
+			reset_lines();
+			continue;
+		}
+		/* Wait for the card to finish programming: state 4, READY_FOR_DATA set. */
+		uint64_t end = ticks() + 19200ULL * 4000;      /* generous: ~4 s */
+		int done = 0;
+		while (ticks() < end) {
+			int st = card_state();
+			if (st == 4 && (last_resp & (1U << 8))) {
+				done = 1;
+				break;
+			}
+			if (st < 0) {
+				break;                                 /* card left transfer state */
+			}
+		}
+		if (done)
 			return 0;
+		reset_lines();
+		e = 6;
 	}
-	return 6;
+	return e;
 }
 
 /* ---------------- fast mode: 8-bit bus, HS52 (50 MHz) ---------------- */
