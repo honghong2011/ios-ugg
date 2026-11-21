@@ -1,6 +1,102 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-21 18:00，第 35 轮）-- 0091 拿到了真日志，但它有个结构性上限
+## ★★★★★ 最新（2026-11-21 20:50，第 36 轮）-- 根文件系统挂上了，卡点变成 launchd 读文件失败
+
+### 里程碑：第一次进到用户态
+
+第 35 轮加的「每步落盘」信标 + `ugginput=0`，一次性解开了两个死结：
+
+```
+UGG INPUT: disabled (ugginput=0)          <- 卡了两个月的拦路虎
+SWEET STEP: IOFindBSDRoot: ufs root device ready
+SWEET STEP: vfs_mountroot: enter
+SWEET MOUNT: trying hfs
+hfs: mounted iOSRoot on device b(1, 0)
+UGG ROOT MOUNTED on ufsroot0
+bsd_init: calling VFS_ROOT
+SWEET: root volume is not authenticated (error 25); continuing unsealed
+bsd_init: done
+load_init_program: attempting to load /sbin/launchd
+```
+
+**根卷挂上了，根 vnode 拿到了，launchd 被执行了。**
+
+### 卡点一（已定位并绕过）：ugg_input.c 没有超时保护
+
+```ugg_input_init()``` 在 `sweet_ufs_init()``` 末尾被调用，位置就在同步 flush 之后。
+它第一件事是 512 次无超时的 MMIO 读：
+
+```c
+for (int i = 0; i < 512; i++) {
+    if (((rd(spmi_core, 0x800 + 4u * i) >> 8) & 0xfff) == 0x008) { ... }
+}
+```
+
+对比 `ugg/shim/spmi.c`：那里每次读都过 `spmi_wait()`（带超时），而且写走 CHNLS
+（0x02400000），而 `ugg_input.c` 只映了 OBSRV（0x02c00000）。
+
+后果：AHB 挂死 -> 机器卡死 -> 外部看门狗重启。**看起来就像「挂载前就死了」**，
+所以前几轮一直在 vfs_mountroot / HFS 里绕圈子。
+
+绕过方式：`ugginput=0`（boot-arg，零代码改动）。**这也是当前默认做法**。
+
+### 卡点二（当前）：HFS 节点描述符当场校验失败
+
+```
+hfs_swap_BTNode: invalid forward link (0x6a13d46a >= 0x00005000)
+hfs: node=19174 fileID=4 volume=iOSRoot device=root_device
+load_init_program: failed loading /sbin/launchd: errno 5
+```
+
+根因在 `hfs-src/core/hfs_endian.c:124`：读节点时 fLink 必须 < totalNodes。
+
+### 只读对照实验：证明损坏在启动前就存在
+
+| | 读写挂载 (0092b) | 只读挂载 (0093) |
+|---|---|---|
+| 挂载期 B 树报错 | **6 条** | **0 条** |
+| 节点 19193 的坏值 | 0xf728c62a | 0xf728c62a 完全相同 |
+| 节点 19174 的坏值 | 0x6a13d46a | 0x6a13d46a 完全相同 |
+
+只读把挂载期错误全清了（**那几条是它自己写的**），但 launchd 那两个节点的坏值
+一比特没变 -> **损坏在我启动之前就在镜像里**。
+
+**并且：不是我的日志害的。** 分区 53 GiB，HFS 卷 16 GiB，
+日志在分区偏移 53 GiB 处 = 卷外 37 GiB，不可能覆盖元数据。（我一度怀疑是它，撤回。）
+
+### 本轮交付物：check-hfs-root.py
+
+421 行，纯 Python 3，无第三方依赖，**只读、不挂载**。
+
+做的正是内核那个检查：读每个 B 树节点头 4 字节（fLink），>= totalNodes 就报错。
+支持 `.simg`（Android sparse，按块随机读，**不用先解压成 16 GiB**）和 `.img`。
+
+**第一版我写错了，被用户的输出当场抓出来：**
+
+```
+node kinds : free=1136, hdr=1, 255=19343     我的表里 255 是"未知"
+```
+
+`kBTLeafNode` 是 **0xFF（255）**，不是 4（`hfs_format.h:737`）。
+后果：19343 个正常叶节点被记成"未知"，1124 个 index 节点（kind 0）
+被记成 "free node"，又因为描述符不是全零而全部误报 —— **176 个假警报**。
+
+修正后对同一份真实镜像重跑，正确分类应为
+`header=1, index=1124, map=1, leaf=19343`。
+
+**教训：工具里写死一个魔数表之前，去头文件里核对。**
+
+### 下一步
+
+1. 用修正后的 `check-hfs-root.py --all` 重跑真实镜像，确认 catalog 干净；
+2. 若干净 -> 问题在 eMMC **读**路径（4 KiB / 8 KiB 多块读的 DMA 与对齐），
+   内核日志里 `UGG IO 2..12` 是唯一能对照的实证；
+3. 修 `ugg_input.c`：所有 MMIO 读加 `deadline_us()`，PON 扫描 512 -> 64，
+   补 `SPMI_CHNLS` 映射，默认关闭（桌面出来再开）。
+
+---
+
+## （2026-11-21 18:00，第 35 轮）-- 0091 拿到了真日志，但它有个结构性上限
 
 ### 实机结果：日志是真的，偏移也对
 

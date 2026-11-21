@@ -44,7 +44,10 @@ CMDLINE="debug=0xc serial=3 cpus=1 keepsyms=1 -v"
 # No -enable_kprintf_spam: mido found that its lines keep drawing over the
 # GUI after the mute, so they dropped it before reaching the home screen.
 CMDLINE="$CMDLINE -noprogress"
-CMDLINE="$CMDLINE rd=ufsroot0 ufsrw=1 rootrw=1"
+# ROOTRW=0 mounts the iOS root read-only. That suppresses the journal
+# initialisation and every metadata write HFS would otherwise do at mount, so a
+# boot that fails read-only cannot have been corrupted by our own write path.
+CMDLINE="$CMDLINE rd=ufsroot0 ufsrw=1 rootrw=${ROOTRW:-1}"
 CMDLINE="$CMDLINE unentitled_ios_sim_launch=1 ignition_level=1"
 CMDLINE="$CMDLINE wdt_test=no_user_checkin wdt=-1 launchd_unsecure_cache=1"
 # 30 Hz, not 60: mido A/B-tested it -- at 60 apps start but never appear,
