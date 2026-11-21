@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..f203486 100644
+index 6b926fe..834ecb9 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,360 @@ static struct {
@@ -478,7 +478,29 @@ index 6b926fe..f203486 100644
  }
  
  static int
-@@ -592,9 +966,16 @@ sweet_ufs_init(void)
+@@ -413,6 +787,21 @@ sweet_ufs_strategy(buf_t bp)
+ 
+ 	bool rd = buf_flags(bp) & B_READ;
+ 
++	/*
++	 * UGG bring-up: the root mount hangs with nothing on screen, so say where
++	 * the I/O actually is. Only the first few go to the console; after that the
++	 * volume is up and the log ring carries the rest.
++	 */
++	{
++		static unsigned int ugg_io_trace;
++		if (ugg_io_trace < 12) {
++			ugg_io_trace++;
++			printf("UGG IO %u blk=0x%llx cnt=%u %s secsize=%u\n",
++			    ugg_io_trace, (uint64_t)buf_blkno(bp), count,
++			    rd ? "rd" : "wr", su.secsize);
++		}
++	}
++
+ 	buf_setresid(bp, count);
+ 	if (!rd && !su.writable) {
+ 		error = EROFS;
+@@ -592,9 +981,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -495,7 +517,7 @@ index 6b926fe..f203486 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -607,7 +988,11 @@ sweet_ufs_init(void)
+@@ -607,7 +1003,11 @@ sweet_ufs_init(void)
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
  
@@ -507,7 +529,7 @@ index 6b926fe..f203486 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1008,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1023,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -522,8 +544,22 @@ index 6b926fe..f203486 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -657,9 +1044,17 @@ sweet_ufs_init(void)
- 	sweet_log_start();
+@@ -654,12 +1056,30 @@ sweet_ufs_init(void)
+ 	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+-	sweet_log_start();
++	/*
++	 * UGG: do NOT start the persistent-log thread yet.
++	 *
++	 * That thread takes sweet_ufs_lock every ufslogsecs seconds and holds it
++	 * while it writes up to 4 MiB. The block device has exactly one lock and one
++	 * polled transfer path, so the root mount -- which runs right after this and
++	 * can take seconds of I/O -- would be made to wait on it. Worse, a slow or
++	 * failing write keeps the lock held across a whole mount. Mount first, then
++	 * start logging; the console ring keeps the early boot either way.
++	 */
++	/* sweet_log_start();  -- moved to sweet_ufs_log_after_mount() */
  	sweet_sample_start();
  	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
 +#if !defined(UGG_BOARD)
@@ -539,6 +575,31 @@ index 6b926fe..f203486 100644
 +#endif
  	return 0;
  }
+ 
+@@ -805,6 +1225,24 @@ sweet_log_start(void)
+ 	}
+ }
+ 
++/*
++ * Start the persistent console log once the root filesystem is mounted.
++ *
++ * Called from bsd_init after vfs_mountroot() succeeds. Until then the only user
++ * of the block device is the mount itself, which must not compete for the
++ * single transfer lock.
++ */
++void
++sweet_ufs_log_after_mount(void)
++{
++	static int started;
++	if (started || !su.ready) {
++		return;
++	}
++	started = 1;
++	sweet_log_start();
++}
++
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
+ int sweet_ufs_rootdev(dev_t *dev);
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
@@ -998,7 +1059,7 @@ index 0000000..21840de
 +}
 +#endif /* UGG_BOARD */
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..910d2f5 100644
+index bb2a2bf..448a433 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -492,7 +492,9 @@ bsd_init(void)
@@ -1012,7 +1073,7 @@ index bb2a2bf..910d2f5 100644
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
  #else
  #define bsd_init_kprintf(x, ...)
-@@ -897,6 +899,22 @@ bsd_init(void)
+@@ -897,10 +899,40 @@ bsd_init(void)
  		}
  #endif
  		printf("cannot mount root, errno = %d\n", err);
@@ -1035,6 +1096,24 @@ index bb2a2bf..910d2f5 100644
  	}
  
  	IOSecureBSDRoot(rootdevice);
+ 
++	/*
++	 * UGG: the root is mounted, so the persistent console log may take the
++	 * block device now. It was deliberately not started at driver init because
++	 * its thread competes for the single eMMC transfer lock that the mount
++	 * itself needs.
++	 */
++#if defined(UGG_BOARD)
++	{
++		extern void sweet_ufs_log_after_mount(void);
++		sweet_ufs_log_after_mount();
++		printf("UGG ROOT MOUNTED on %s\n", rootdevice);
++	}
++#endif
++
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+ 
+ 	bsd_init_kprintf("calling VFS_ROOT\n");
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 68612db..576f70f 100644
 --- a/bsd/kern/kern_exec.c
