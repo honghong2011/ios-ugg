@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..244b194 100644
+index 6b926fe..612e647 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,360 @@ static struct {
@@ -509,7 +509,137 @@ index 6b926fe..244b194 100644
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -592,9 +990,16 @@ sweet_ufs_init(void)
+@@ -583,6 +981,129 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+ 	.d_type       = D_DISK,
+ };
+ 
++/*
++ * UGG: read the HFS catalog b-tree back off the device and report which nodes
++ * have a broken descriptor.
++ *
++ * The kernel rejects catalog nodes 19174..19514 with "invalid forward link"
++ * even on a freshly flashed image that tools/check-hfs-root.py certifies as
++ * undamaged, and even when the volume is mounted read-only. So the bytes the
++ * driver hands to HFS do not match the bytes in the image. This walks the tree
++ * with the same read path the mount uses and prints the raw descriptors, which
++ * separates "the device gave us wrong bytes" from "HFS misparsed good bytes".
++ *
++ * Boot-arg uggcheck=1, or uggcheck=2 to dump the failing nodes in hex.
++ */
++#define UGG_CK_MAXNODE 32768
++
++static void
++ugg_check_btree(void)
++{
++	uint32_t mode = 1;
++	PE_parse_boot_argn("ugcheck", &mode, sizeof(mode));
++	if (!mode) {
++		return;
++	}
++
++	uint8_t *bounce = (uint8_t *)(su.dma + DMA_BOUNCE);
++	/* Volume header: device block su.first_block + 0, offset 1024. */
++	if (ufs_read_blocks(su.first_block, 1)) {
++		printf("UGG CHECK: cannot read the volume header\n");
++		return;
++	}
++	uint8_t *vh = bounce + 1024;
++	if (vh[0] != 'H' || (vh[1] != '+' && vh[1] != 'X')) {
++		printf("UGG CHECK: no HFS+ signature (%02x %02x)\n", vh[0], vh[1]);
++		return;
++	}
++	uint32_t blockSize = (uint32_t)vh[40] << 24 | (uint32_t)vh[41] << 16 |
++	    (uint32_t)vh[42] << 8 | (uint32_t)vh[43];
++
++	/* Catalog fork = fileID 4; its extents start at byte 272 of the header. */
++	uint32_t ext[8][2];
++	for (int i = 0; i < 8; i++) {
++		const uint8_t *e = vh + 272 + 16 + i * 8;
++		ext[i][0] = (uint32_t)e[0] << 24 | (uint32_t)e[1] << 16 | (uint32_t)e[2] << 8 | e[3];
++		ext[i][1] = (uint32_t)e[4] << 24 | (uint32_t)e[5] << 16 | (uint32_t)e[6] << 8 | e[7];
++	}
++	printf("UGG CHECK: catalog blockSize=%u extents:", blockSize);
++	for (int i = 0; i < 8; i++) {
++		if (ext[i][1]) {
++			printf(" %u+%u", ext[i][0], ext[i][1]);
++		}
++	}
++	printf("\n");
++
++	/* Read the tree header node (logical node 0) to get nodeSize/totalNodes. */
++	if (ufs_read_blocks(su.first_block + ext[0][0], 1)) {
++		printf("UGG CHECK: cannot read the catalog header node\n");
++		return;
++	}
++	/* BTNodeDescriptor is 14 bytes; the BTreeHeaderRec follows an offset pair. */
++	const uint8_t *h = bounce;
++	uint32_t nodeSize = (uint32_t)h[14 + 18] << 8 | h[14 + 19];
++	uint32_t totalNodes = (uint32_t)h[14 + 22] << 24 | (uint32_t)h[14 + 23] << 16 |
++	    (uint32_t)h[14 + 24] << 8 | h[14 + 25];
++	printf("UGG CHECK: nodeSize=%u totalNodes=%u\n", nodeSize, totalNodes);
++	if (nodeSize < 512 || nodeSize > UFS_BLOCK || totalNodes > UGG_CK_MAXNODE) {
++		printf("UGG CHECK: implausible geometry, stopping\n");
++		return;
++	}
++
++	/*
++	 * Walk every node through the extent map. Read a whole extent into the
++	 * bounce buffer when it fits, so the I/O pattern difference between one
++	 * large read and many small ones shows up in the results.
++	 */
++	uint32_t node = 0;
++	int bad = 0, checked = 0;
++	for (int i = 0; i < 8 && ext[i][1]; i++) {
++		uint64_t bytes = (uint64_t)ext[i][1] * blockSize;
++		uint64_t per = nodeSize;
++		uint32_t in_ext = (uint32_t)(bytes / per);
++		printf("UGG CHECK: ext%d block %u count %u -> nodes %u..%u\n",
++		    i, ext[i][0], ext[i][1], node, node + in_ext - 1);
++		for (uint32_t done = 0; done < in_ext; ) {
++			uint32_t chunk = (uint32_t)MIN((uint64_t)(BOUNCE_SIZE / nodeSize),
++			    (uint64_t)(in_ext - done));
++			uint64_t firstblk = (uint64_t)ext[i][0] +
++			    (uint64_t)done * nodeSize / blockSize;
++			if (ufs_read_blocks(su.first_block + firstblk, chunk * nodeSize / blockSize)) {
++				printf("UGG CHECK: read failed at node %u\n", node + done);
++				return;
++			}
++			for (uint32_t k = 0; k < chunk; k++) {
++				const uint8_t *n = bounce + (uint64_t)k * nodeSize;
++				uint32_t fLink = (uint32_t)n[0] << 24 | (uint32_t)n[1] << 16 |
++				    (uint32_t)n[2] << 8 | n[3];
++				uint32_t bLink = (uint32_t)n[4] << 24 | (uint32_t)n[5] << 16 |
++				    (uint32_t)n[6] << 8 | n[7];
++				uint32_t kind = n[8];
++				uint32_t idx = node + done + k;
++				checked++;
++				if (fLink >= totalNodes || bLink >= totalNodes ||
++				    (kind != 0 && kind != 1 && kind != 2 && kind != 0xff)) {
++					bad++;
++					if (bad <= 20) {
++						printf("UGG CHECK: BAD node=%u fLink=0x%08x bLink=0x%08x kind=0x%02x\n",
++						    idx, fLink, bLink, kind);
++					}
++					if (mode >= 2 && bad == 1) {
++						printf("UGG CHECK: first 32 bytes:");
++						for (int q = 0; q < 32; q++) {
++							printf(" %02x", n[q]);
++						}
++						printf("\n");
++					}
++				}
++			}
++			done += chunk;
++		}
++		node += in_ext;
++	}
++	printf("UGG CHECK: walked %d nodes, %d with a bad descriptor\n", checked, bad);
++}
++
+ static int
+ sweet_ufs_init(void)
+ {
+@@ -592,9 +1113,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -526,7 +656,7 @@ index 6b926fe..244b194 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -607,7 +1012,11 @@ sweet_ufs_init(void)
+@@ -607,7 +1135,11 @@ sweet_ufs_init(void)
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
  
@@ -538,7 +668,7 @@ index 6b926fe..244b194 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1032,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1155,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -553,7 +683,7 @@ index 6b926fe..244b194 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -654,12 +1065,38 @@ sweet_ufs_init(void)
+@@ -654,12 +1188,39 @@ sweet_ufs_init(void)
  	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
  	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
@@ -577,6 +707,7 @@ index 6b926fe..244b194 100644
 +		sweet_log_start();
 +		(void)sweet_ufs_flush_log_now();
 +	}
++	ugg_check_btree();
  	sweet_sample_start();
  	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
 +#if !defined(UGG_BOARD)
@@ -593,7 +724,7 @@ index 6b926fe..244b194 100644
  	return 0;
  }
  
-@@ -669,7 +1106,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1230,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -602,7 +733,7 @@ index 6b926fe..244b194 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1115,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1239,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -611,7 +742,7 @@ index 6b926fe..244b194 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1173,118 @@ struct sweet_log_header {
+@@ -736,66 +1297,118 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -623,7 +754,9 @@ index 6b926fe..244b194 100644
 +/* First device block of the log area: just past the end of the partition. */
 +static uint64_t
 +sweet_log_base(void)
-+{
+ {
+-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
 +	return su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +}
 +
@@ -646,9 +779,7 @@ index 6b926fe..244b194 100644
 + */
 +static int
 +sweet_log_write_locked(void)
- {
--	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
--	uint64_t flushed = 0, seq = 0;
++{
 +	uint64_t base = sweet_log_base();
  	void *bounce = (void *)(su.dma + DMA_BOUNCE);
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
@@ -764,7 +895,7 @@ index 6b926fe..244b194 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1294,102 @@ sweet_log_start(void)
+@@ -805,6 +1418,102 @@ sweet_log_start(void)
  	}
  }
  

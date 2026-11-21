@@ -61,6 +61,9 @@ CMDLINE="$CMDLINE ugg_vcscale=2"
 # EXTRA_CMDLINE lets one shim+kernel pair produce both a normal image and the
 # display selftest image (EXTRA_CMDLINE=ugg_fbtest=1), which holds the colour
 # bars on screen long enough to photograph.
+# ugcheck=1 walks the HFS catalog b-tree straight off the device before the
+# mount, and reports every node whose descriptor is broken. That separates
+# "the eMMC gave us the wrong bytes" from "HFS misparsed good bytes".
 CMDLINE="$CMDLINE ${EXTRA_CMDLINE:-}"
 echo "=== payload"
 python $HERE2/tools/mkpayload.py "$KERNEL" $ROOT/build/img/ugg.adt \
