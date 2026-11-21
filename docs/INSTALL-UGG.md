@@ -276,6 +276,68 @@ launchd 启动
 
 ---
 
+## 取内核日志（TWRP + ADB，3 步）
+
+**不需要改代码、不需要刷任何东西。** 内核本来就把控制台日志写在
+**userdata 的最后 4 MiB + 4 KiB**，这是为「屏幕拍不清」准备的。
+
+### 前提
+
+- 手机进 **TWRP**（或 OrangeFox）
+- 电脑装了 **adb**（platform-tools）
+- TWRP 里 **Mount → 勾选 Data**（如果 data 加密了就跳过这步，用下一节的 raw 方式）
+
+### 方式一：raw dd（最稳，不依赖挂载）
+
+```bash
+# 1. 看分区表，找到 userdata 的最后一个扇区
+adb shell fdisk -l /dev/block/mmcblk0
+```
+
+输出里找 `userdata` 那行，记下 **Start** 和 **Sectors**（单位 512 字节）。
+
+```bash
+# 2. 把数字填进去算 skip（4K 块单位）
+#    skip = (Start + Sectors)/8 - 1025
+adb shell dd if=/dev/block/mmcblk0 bs=4096 skip=<skip> count=1025 of=/sdcard/sweetlog.bin
+
+# 3. 拉出来
+adb pull /sdcard/sweetlog.bin
+```
+
+### 方式二：让 shell 自己算（省事）
+
+```bash
+adb shell 'D=/dev/block/bootdevice/by-name/userdata; \
+  SZ=$(blockdev --getsz $D); \
+  SK=$(( SZ/8 - 1025 )); \
+  dd if=$D bs=4096 skip=$SK count=1025 of=/sdcard/sweetlog.bin'
+adb pull /sdcard/sweetlog.bin
+```
+
+### 解码
+
+```bash
+python tools/sweet-log.py sweetlog.bin out.txt
+```
+
+成功的话第一行会告诉你版本和刷写序号：
+
+```
+# version 1, ring 4194304, total 123456 bytes, flush #7
+```
+
+然后 `out.txt` 就是完整的内核控制台输出——包括 panic 原文。
+
+**如果报 `no SWEETLOG header`**：说明日志线程一次都没跑起来（例如死在
+挂载之前）。这时文件全是 0，直接告诉我，我换别的办法。
+
+### 现在的改进：失败时会主动刷一次
+
+本轮加了 `sweet_ufs_flush_log_now()`，在 `cannot mount root` panic **之前**
+**同步**写一次日志。所以即使日志线程从来没启动，只要 eMMC 能写，
+日志也一定在分区末尾。这比等 10 秒一次的线程可靠得多。
+
 ## 7. 故障排查
 
 ### 7.1 `RGB0 ... REFUSED`

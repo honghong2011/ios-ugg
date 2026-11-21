@@ -108,9 +108,15 @@ adb shell "dd if=/dev/block/bootdevice/by-name/userdata bs=4096 skip=$(( $(block
 adb pull /sdcard/sweetlog.bin
 ```
 
-### 产物
+### 产物（已出）
 
-（编译中，CI run `44864074728`）
+| 文件 | 内容 | sha256 |
+|---|---|---|
+| **`shim-boot-0090-final.img`** | 含全部本轮修复 | `8e850b026060989dbb4e5c5d3f80759f412e6a7290026fde7f33a72c04807615` |
+| 内核 | CI `44866379049` success | `e2a8b9d85b9c47a57f7f683406b619fea6bb56f50d7bf65e4de67329ecafc16b` |
+| shim | CI `44865566945` success | `5717bd9cffc6572facdd5f3de152725641d83b4de8862daa7fdcb84a93ad5f98` |
+
+镜像内已验证包含：I/O 追踪、日志延后启动、同步刷日志、挂载成功/失败标记。
 
 
 ## ★★★★★ （2026-11-21 11:00，第 32 轮）-- 找到并修掉自己写的字节序 bug
