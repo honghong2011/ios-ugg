@@ -71,6 +71,18 @@ header 里的 `total` 是**写的那一刻**的值，所以：
 | `SWEET MOUNT: hfs returned <errno>` | **这就是一直没拿到的 errno** |
 | 最后一条是 `UGG IO n` | 卡在 HFS 的读里面，n 说明读到第几块 |
 
+### 镜像
+
+**`shim-boot-0092-beacons.img`** —— 8,173,568 B，
+sha256 `92b09aed66e28fe589dcdb2c95a508fb72d258dfd6c809604ca4291d0a002da4`
+
+- 内核 `kernel.development.sweet` sha256 `95c14d5dff688d438ac5bc12ba8b375874ce64e8cac1d526f4d4a64b588270df`
+  （CI `44891665770` success）
+- shim 未变：`5717bd9cffc6572facdd5f3de152725641d83b4de8862daa7fdcb84a93ad5f98`
+- 已验证镜像内 payload 含全部新信标字符串（SWEET STEP / SWEET MOUNT / 各 tag 各一处）。
+- 注意：`gh` 默认仓库解析成 `dipa-studio/ios-sweet`，下载 artifact 必须加 `-R honghong2011/ios-ugg`。
+
+
 ---
 
 ## （2026-11-21 17:40，第 34 轮）-- 修掉“日志取不到”的三个真因
