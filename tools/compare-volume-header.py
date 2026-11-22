@@ -219,9 +219,16 @@ def main():
     print('   report "everything after the first difference is wrong", which is')
     print('   true and useless: it says nothing about the transfer.')
     print()
-    print('   What this most likely means: the card still holds an EARLIER image')
-    print('   (the flash never happened), or a different file was written.')
-    print('   Settle which by checking the volume header on the card itself.')
+    print('   Do NOT read "smaller extent numbers" as "older image". That inference')
+    print('   was tried on this port and the data contradicted it: the card asked for')
+    print('   node 19514 while the current image has no leaf above 19491, so the card')
+    print('   holds MORE catalog content in the upper range, not less.')
+    print()
+    print('   What can be said: a different volume on the card means either the flash')
+    print('   never ran (the card still holds an earlier write) or a different file')
+    print('   was written. Which one cannot be decided from these numbers, and does')
+    print('   not need to be: this check only answers "is it this image or not", and')
+    print('   the answer is no.')
     return 1
 
 
