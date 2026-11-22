@@ -84,7 +84,21 @@ def main():
         section('sparse image: %s' % simg)
         rc, line, out = run('simg-info.py', [simg, '--list-dont-care'])
         print(out.strip())
-        results.append(('simg-info', rc, line))
+        # simg-info exits 1 for a RAW image, which is not a fault -- it is an answer
+        # ('this is not sparse'). Reporting that as FAIL accuses a healthy file, and
+        # this project has already lost rounds to checks that cry wolf.
+        is_sparse = 'not a sparse image' not in out
+        results.append(('simg-info', 0 if is_sparse else None,
+                        'raw image' if not is_sparse else line))
+
+        # The two paths the kernel actually tries to exec. If either is missing
+        # from the image, errno 5 is not about the catalog and the whole direction
+        # changes; if both are present, the catalog is the only explanation left.
+        section('boot-critical paths resolved through the catalog')
+        for want in ('/sbin/launchd', '/usr/lib/dyld'):
+            rc, line, out = run('hfs-find.py', [simg, want])
+            print(out.strip()[-600:])
+            results.append(('hfs-find %s' % want, rc, line))
 
         section('image b-tree (this is what the kernel will walk)')
         rc, line, out = run('check-hfs-root.py', ['--all', simg])
@@ -135,6 +149,8 @@ def main():
         'check-hfs-root': ('sane', 'PROBLEMS'),
         'check-touch-math': ('holds', 'FAILED'),
         'simg-info': ('ok', 'ok'),
+        'hfs-find /sbin/launchd': ('found', 'ABSENT'),
+        'hfs-find /usr/lib/dyld': ('found', 'ABSENT'),
     }
     worst = 0
     for name, rc, line in results:
