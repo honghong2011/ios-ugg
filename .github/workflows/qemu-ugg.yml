@@ -74,7 +74,17 @@ jobs:
           # off the panel, but this check exists to READ the console: with it set,
           # the run decodes to an empty screen and the check is green and blind.
           CMDLINE="debug=0xc cpus=1 keepsyms=1 -v -noprogress ugg_vcscale=2"
-          CMDLINE="$CMDLINE sweetfb_hz=30 ugginput=0"
+          # ugginput=1 on purpose. This board has no touch hardware under QEMU, so
+          # ugg_input_init() will try to map and read MMIO that does not exist: the
+          # QUP3 I2C controller, SPMI, and TLMM pads. The question is not whether
+          # touch works (it cannot) but whether a missing device makes it fail
+          # cleanly -- every read on this path is bounded by a deadline, and an
+          # unbounded one has hung this port three times before.
+          #
+          # If QEMU reaches the idle loop with ugginput=1, the failure path is safe.
+          # If it stops, this check just caught a hang that would otherwise have
+          # cost a phone boot and a log retrieval.
+          CMDLINE="$CMDLINE sweetfb_hz=30 ugginput=1"
           python3 tools/mkpayload.py k/kernel.development.sweet k/ugg-qemu.adt k/payload.bin --cmdline "$CMDLINE"
           ls -l k/
 
