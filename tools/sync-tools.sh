@@ -15,16 +15,21 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=$HERE/ugg/tools
 DST=$HERE/取日志工具
 CHECK=0
+FORCE=0
 # Note: not "[ ... ] && X" -- under set -e a false test aborts the whole script.
-if [ "${1:-}" = "--check" ]; then
-    CHECK=1
-fi
+for arg in "$@"; do
+    case "$arg" in
+        --check) CHECK=1 ;;
+        -f|--force) FORCE=1 ;;
+        *) echo "usage: $0 [--check] [-f|--force]" >&2; exit 2 ;;
+    esac
+done
 
 # The tools the user actually runs from that folder. Keep this list short: it is
 # what they double-click, not the whole toolbox.
 FILES="pull-log.cmd ugg-grab-log.sh sweetlog-decode.ps1 怎么取日志.txt \
 read-node.cmd read-node.sh verify-flash.sh verify-card.py simg-info.py \
-check-hfs-root.py check-raw.py compare-blocks.py find-bytes.py"
+check-hfs-root.py check-raw.py compare-blocks.py find-bytes.py decode-bad-nodes.py"
 
 [ -d "$DST" ] || { echo "missing $DST" >&2; exit 1; }
 
@@ -57,12 +62,20 @@ for d in "$DST"/*; do
     case " $FILES " in
         *" $b "*) ;;
         *)
-            if [ "$CHECK" = 1 ]; then
-                echo "STALE $b"
-                drift=1
-            else
+            # A file in the destination that nobody listed is either genuinely
+            # obsolete or a tool someone added without updating FILES. This used to
+            # delete it outright, which silently destroyed a tool added earlier the
+            # same session -- the mirror is for the user, the repo is the source of
+            # truth, so guessing 'obsolete' is the wrong default.
+            #
+            # Report it and leave it alone. -f/--force removes it, for when the
+            # removal really is intended.
+            if [ "$FORCE" = 1 ]; then
                 rm -f "$d"
-                echo "removed stale $b"
+                echo "removed unlisted $b (--force)"
+            else
+                echo "UNLISTED $b (left in place; add it to FILES, or pass --force to remove)"
+                drift=1
             fi
             ;;
     esac
