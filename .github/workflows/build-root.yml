@@ -252,3 +252,17 @@ jobs:
           path: work/parts/
           retention-days: 5
           if-no-files-found: warn
+
+      # The validation logs are the evidence that the image was checked, and they
+      # are small. Without this the run says 'Validate ... success' and nothing
+      # else, which cannot be audited later -- and an assertion nobody can re-read
+      # is hard to distinguish from one that never ran.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hfs-check
+          path: |
+            hfs-check.txt
+            hfs-check-sparse.txt
+          retention-days: 30
+          if-no-files-found: warn
