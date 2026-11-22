@@ -51,20 +51,23 @@ for f in sbin/launchd usr/lib/dyld bin/sh \
             # Decide from the numeric mode, and treat unknown as unknown, not as fine.
             mode=$(stat -c '%a' "$ROOT/$f" 2>/dev/null || echo '')
             owner=$(stat -c '%U:%G' "$ROOT/$f" 2>/dev/null || echo '?')
+            # Is this entry supposed to be executable? A plist at 644 is CORRECT, and
+            # printing 'NOT-EXEC' next to it is noise that trains the reader to ignore
+            # the column -- which is how a real NOT-EXEC gets missed.
+            need_exec=0
+            case "$f" in
+                sbin/launchd|usr/lib/dyld) need_exec=1 ;;
+            esac
             case "$mode" in
-                '')     x=UNKNOWN-MODE ;;
-                *[1357]) x=exec ;;
-                *)       x=NOT-EXEC ;;
+                '')     x='UNKNOWN-MODE' ;;
+                *[1357]) x='exec' ;;
+                *)      if [ "$need_exec" = 1 ]; then x='NOT-EXEC'; else x='data'; fi ;;
             esac
             echo "  present  $f  (${sz} bytes, mode ${mode}, $owner, ${x})"
-            case "$f" in
-                sbin/launchd|usr/lib/dyld)
-                    if [ "$x" = NOT-EXEC ]; then
-                        echo "           ^ NOT EXECUTABLE: the kernel cannot exec this"
-                        missing=1
-                    fi
-                    ;;
-            esac
+            if [ "$need_exec" = 1 ] && [ "$x" = 'NOT-EXEC' ]; then
+                echo "           ^ NOT EXECUTABLE: the kernel cannot exec this"
+                missing=1
+            fi
         else
             echo "  present  $f  (directory)"
         fi
@@ -72,6 +75,13 @@ for f in sbin/launchd usr/lib/dyld bin/sh \
         echo "  MISSING  $f"
         case "$f" in
             sbin/launchd|usr/lib/dyld) missing=1 ;;
+            bin/sh)
+                # Not fatal for exec'ing launchd, but launchd runs daemons through
+                # /bin/sh, and a silent MISSING line is how that goes unnoticed for
+                # several rounds.
+                echo "           ^ NOTE: launchd runs daemons via /bin/sh;"
+                echo "             without it every shell job fails later."
+                ;;
         esac
     fi
 done
