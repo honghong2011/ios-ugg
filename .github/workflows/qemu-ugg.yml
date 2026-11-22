@@ -84,13 +84,36 @@ jobs:
           grep -i 'esr|fault|panic' qout/qemu.log 2>/dev/null | head -20 || true
 
       - name: Verdict
+        # Now calibrated: run 45032399238 failed with 'Expected 64 seed bytes ...
+        # but got 48' and run 45032900290 passed with 368 IRQs and no faults. So
+        # the shape of a broken boot is known, and this can gate.
+        #
+        # A real fault (undefined instruction, prefetch/data abort, panic) is a
+        # failure. IRQs are not: the kernel idles in machine_idle servicing timer
+        # interrupts, which is what a healthy boot looks like.
         run: |
-          ls -l qout 2>/dev/null || true
-          if [ -f qout/fb.png ]; then
-            echo "framebuffer snapshot: $(stat -c%s qout/fb.png) bytes"
-          else
-            echo 'no framebuffer snapshot -- QEMU died before the panel came up'
+          set -e
+          log=qout/qemu.log
+          faults=0
+          if [ -f "$log" ]; then
+            faults=$(grep -cE 'Undefined Instruction|Prefetch Abort|Data Abort|panicked|panic\(\)' "$log" || true)
           fi
+          irqs=$(grep -c 'Taking exception 5 \[IRQ\]' "$log" 2>/dev/null || echo 0)
+          echo "IRQs seen : $irqs"
+          echo "faults    : $faults"
+          if [ -f qout/fb.png ]; then
+            echo "framebuffer: $(stat -c%s qout/fb.png) bytes"
+          fi
+          if [ "$faults" -gt 0 ]; then
+            echo "::error title=qemu-fault::kernel faulted $faults time(s) -- see qemu-ugg artifact"
+            grep -E 'Undefined Instruction|Prefetch Abort|Data Abort|panic' "$log" | head -10
+            exit 1
+          fi
+          if [ "$irqs" -lt 5 ]; then
+            echo "::error title=qemu-too-quiet::only $irqs IRQs -- the kernel never reached a running state"
+            exit 1
+          fi
+          echo "::notice title=qemu-ok::$irqs IRQs, 0 faults" 
 
       - uses: actions/upload-artifact@v4
         if: always()
