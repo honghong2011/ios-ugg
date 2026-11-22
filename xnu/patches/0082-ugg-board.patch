@@ -1218,16 +1218,16 @@ index 6b926fe..c133196 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..b477c18
+index 0000000..2b6e775
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,528 @@
+@@ -0,0 +1,534 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
 + *
 + * The ugg shim prepares the hardware before XNU starts (shim/input.c
-+ * input_setup): RPM ldoa10 2.85 V (touch vdd_ana), ldoa6 1.8 V (vcc_i2c),
++ * input_setup): RPM ldoa10 2.85 V (touch vdd_ana), ldoa5 1.8 V (vcc_i2c),
 + * BLSP1 AHB + QUP3 I2C clocks, gpio10/11 = blsp_i2c3 (mux 2), gpio65 (touch
 + * irq) as an input, gpio64 (reset) released. This file only polls; it never
 + * writes the PMIC or the pinmux.
@@ -1241,11 +1241,17 @@ index 0000000..b477c18
 + *       goodix,reset-gpio        gpio 64, active low
 + *       goodix,irq-gpio          gpio 65
 + *       goodix,power_ldo-gpio    gpio 47
-+ *       vdd_ana-supply  regulator-l10 (2.85 V)
-+ *       vcc_i2c-supply  regulator-l6  (1.8 V)
++ *       vdd_ana-supply  phandle 0xd3 -> rpm-regulator-ldoa10 (pm8937_l10), 2.85 V
++ *       vcc_i2c-supply  phandle 0xc1 -> rpm-regulator-ldoa5  (pm8937_l5),  1.8 V
 + *       goodix,display-coords <0 0 1200 1920>   (max_x 1200, max_y 1920)
 + *   soc/gpio_keys: vol_up on a TLMM gpio, active low
 + *   PMI8937 PON: KPDPWR = power, RESIN = volume down
++ *
++ * vcc_i2c used to be documented (and voted) as regulator-l6. That is mido's
++ * rail, not ugg's: the supply phandle in this board's own DT resolves to
++ * rpm-regulator-ldoa5, and with L5 off the QUP3 pull-ups have no supply, so the
++ * bus reads 0xFF no matter what the protocol does. Verified by parsing
++ * device-dumps/msm8937-dtbundle.bin (ugg/tools/dtb-find.py), not by copying mido.
 + *
 + * The touch IC reports in its own 1200x1920 coordinate space, which is
 + * larger than this 720x1280 panel, so every point is scaled. The maxima are
@@ -2685,22 +2691,21 @@ index fbcdfac..41be9ea 100644
  	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
  	void free() APPLE_KEXT_OVERRIDE;
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
-index 27bc49d..944bc23 100644
+index 27bc49d..405a944 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -356,6 +356,46 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
+@@ -356,6 +356,45 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
   * app-switcher gesture.
   */
  #define SWEET_TOUCH_EDGE_PX 48
 +/*
-+ * The coordinate space the hardware driver delivers, in pixels. This is NOT the
-+ * digitizer's own reported resolution: ugg_input.c reads the GT9xx config block
-+ * (1200x1920 here) and scales every point into panel pixels before calling
-+ * sweet_hid_touch(), so what arrives here is always 720x1280 on ugg.
++ * The coordinate space the hardware driver delivers, in pixels, and the space we
++ * normalize into.
 + *
-+ * Getting this wrong is not a rounding error: normalizing 720-wide values by
-+ * 1080 squeezes the whole panel into 2/3 of the display, so the bottom and right
-+ * thirds of the screen never respond to touch.
++ * ugg got both wrong: ugg_input.c scales the GT9xx report (1200x1920) into PANEL
++ * pixels, but this file normalized by 1080x1920, i.e. a display two thirds larger
++ * than the one attached. Every touch landed in the top-left corner and the outer
++ * third of the panel never responded -- not a rounding error, a wrong space.
 + */
 +#if defined(UGG_BOARD)
 +/*
@@ -2735,7 +2740,7 @@ index 27bc49d..944bc23 100644
  class SweetHIDTouch : public IOHIDEventService {
  	OSDeclareDefaultStructors(SweetHIDTouch);
  public:
-@@ -434,14 +474,34 @@ SweetHIDTouch::start(IOService *provider)
+@@ -434,14 +473,34 @@ SweetHIDTouch::start(IOService *provider)
  	}
  	int native = 0;
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
@@ -2770,7 +2775,7 @@ index 27bc49d..944bc23 100644
  	gSweetTouch = this;
  	registerService();
  	IOLog("SWEET HID: touch registered\n");
-@@ -458,22 +518,41 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -458,22 +517,41 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
  	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
  		return;
  	}

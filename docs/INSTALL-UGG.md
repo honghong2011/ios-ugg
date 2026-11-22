@@ -207,13 +207,26 @@ adb shell "blkid /dev/block/bootdevice/by-name/userdata"
 
 **关键：目标分区是 `userdata`，不是 `system`。**
 
+> # ⛔ 先读这一段：写 userdata 是被禁止的
+>
+> `ugg/AGENTS.md` 和 `README.md` 都明确写着：**data/userdata 分区只读、绝不触碰**，
+> 清空时机由用户自己负责；2026-10-15 那次授权针对的是 *sweet*，**不是 ugg**。
+>
+> 所以下面这些 `flash userdata` / `erase userdata` 命令是**破坏性**的，
+> 只能由用户在自己决定的时机执行。**不要照抄执行。**
+>
+> 符合约束的路线是 **SD 卡**：用 SDHCI-msm 驱动挂 SD 卡上的完整 iOS 根，
+> 完全不碰 userdata（`README.md` 早已把它列为 U6）。那条线还没做。
+>
+> 本节保留，是因为它记录了 mido 的刷写方式与踩过的坑，仍是有效的技术资料。
+
 > **只刷 `.simg`，一条命令。** 这一节 2026-11-22 重写过：
 > 之前的版本让你先 `simg2img` 转 raw、再用自写的分块脚本一点点 dd 进去 ——
 > 那条路在本机从来没成功过（`adb exec-in dd` 静默不写、`/sdcard`
 > 就住在 userdata 上塞不进 16 GiB、TWRP 的 dd 不接受 `1M` 后缀），
-> 相关脚本已删除。**mido 的刷法就是下面这一条，照做即可。**
+> 相关脚本已删除。
 
-### 5.1 唯一推荐的写法
+### 5.1 存档：mido 的写法（**破坏性，需用户自行授权**）
 
 ```bash
 # 手机先进 fastboot

@@ -165,13 +165,20 @@ input_setup(void)
 {
 	int e = rpm_ldo_enable(10, 2850000, 40);              /* touch vdd_ana (2.85 V) */
 	/*
-	 * vcc_i2c too. ugg's device tree gives goodix@5d vcc_i2c-supply =
-	 * regulator-l6 (1.8 V), and without it the QUP3 pull-ups have no rail,
-	 * so the bus reads 0xFF no matter what the protocol does.
-	 * The return value is ignored: if the RPM refuses, the driver still
-	 * reports the touch IC id and the failure is visible in the log.
+	 * vcc_i2c too. Read from ugg's OWN device tree (device-dumps/msm8937-dtbundle.bin,
+	 * /soc/i2c@78b7000/goodix_ts@5d):
+	 *
+	 *     vdd_ana-supply -> phandle 0xd3 -> rpm-regulator-ldoa10 (pm8937_l10)
+	 *     vcc_i2c-supply -> phandle 0xc1 -> rpm-regulator-ldoa5  (pm8937_l5)
+	 *
+	 * This used to vote L6, which is mido's rail. On ugg the I2C pull-ups have no
+	 * supply unless L5 is up, and then QUP3 reads 0xFF no matter what the protocol
+	 * does -- which is exactly the symptom the driver kept reporting.
+	 *
+	 * The return value is ignored: if the RPM refuses, the driver still reports the
+	 * touch IC id and the failure stays visible in the log.
 	 */
-	int e6 = rpm_ldo_enable(6, 1800000, 40);              /* vcc_i2c (1.8 V) */
+	int e6 = rpm_ldo_enable(5, 1800000, 40);              /* vcc_i2c (1.8 V) */
 	*(volatile uint32_t *)GCC_APCS_CLK_VOTE |= (1u << 10);
 	*(volatile uint32_t *)GCC_QUP3_I2C_CBCR |= 1u;
 	delay_ms(2);
