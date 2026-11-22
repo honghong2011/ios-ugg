@@ -181,7 +181,12 @@ jobs:
           # PIPESTATUS: the latter is bash-specific and a stray quote in it has
           # already broken this file once.
           set -o pipefail
+          # Two outputs on purpose. check-boot-files.sh is the quick gate;
+          # image-manifest.sh is the audit trail -- it also records sizes, modes,
+          # owners and Mach-O magic, so the answer can be re-read later without
+          # the 5.8 GB of parts.
           sh ./tools/check-boot-files.sh work/mnt 2>&1 | tee boot-files.txt
+          sh ./tools/image-manifest.sh work/mnt work/image-manifest.txt 2>&1 | tee -a boot-files.txt
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
@@ -274,9 +279,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hfs-check
+          name: image-check
+          # Renamed from hfs-check: it now answers more than the b-tree question.
           path: |
             boot-files.txt
+            work/image-manifest.txt
             hfs-check.txt
             hfs-check-sparse.txt
           retention-days: 30
