@@ -124,11 +124,31 @@ def main():
         if kind == 0xff:
             leaves.append(idx)
         elif kind == 0x00:
+            # An INDEX node's records are: key, then a uint32 child node number.
+            # The offset table (numRecords * uint16 at byte 14) gives where each
+            # record STARTS; the child pointer is the last 4 bytes of the record,
+            # after its key.
+            #
+            # This used to read be32(node, 14 + i*2), i.e. it treated the offset
+            # table as an array of uint32 child pointers. On a multi-level tree that
+            # descends into garbage, finds a handful of leaves and stops -- which is
+            # exactly what a real image exposed: 73 leaves for a catalog holding
+            # 182380 files. The fixture never caught it because its root node WAS the
+            # leaf, so this branch never executed.
             num = be16(node, 10) if len(node) > 11 else 0
             for i in range(num):
-                off = 14 + i * 2
-                if off + 4 <= len(node):
-                    stack.append(be32(node, off))
+                toff = 14 + i * 2
+                if toff + 2 > len(node):
+                    break
+                roff = be16(node, toff)
+                if roff == 0 or roff > len(node) - 4:
+                    continue
+                start = len(node) - roff
+                keylen = be16(node, start)
+                child_at = start + 2 + keylen
+                if child_at + 4 > len(node):
+                    continue
+                stack.append(be32(node, child_at))
     leaves.sort()
 
     path_of = {1: ''}
