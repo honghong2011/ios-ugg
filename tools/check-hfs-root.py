@@ -342,6 +342,25 @@ def check_btree(img, fork, blocksize, label, walk_all=True):
     return problems
 
 
+def compare_regions(img, blocksize, a, b, nbytes):
+    """Diff two image regions byte by byte."""
+    da = img.read(a * blocksize, nbytes)
+    db = img.read(b * blocksize, nbytes)
+    print("A block %d (byte 0x%x): %d bytes" % (a, a * blocksize, len(da)))
+    print("B block %d (byte 0x%x): %d bytes" % (b, b * blocksize, len(db)))
+    print()
+    for name, off in (("A", 0),):
+        pass
+    for i in range(0, min(len(da), len(db)), 16):
+        ra = da[i:i + 16]
+        rb = db[i:i + 16]
+        mark = "" if ra == rb else "  <-- differs"
+        print("  +0x%06x  %s | %s%s" % (i, ra.hex(" "), rb.hex(" "), mark))
+    same = da == db
+    print()
+    print("identical:", same)
+
+
 def dump_block(img, blocksize, block, count, blkargs):
     """Print raw bytes of the image at a given allocation block."""
     off = block * blocksize
@@ -427,6 +446,24 @@ def main():
             return 2
         blkargs = (nums[0], nums[1] if len(nums) > 1 else 256)
         del argv[i:i + 1 + consumed]
+    if "--compare" in argv:
+        i = argv.index("--compare")
+        nums = []
+        consumed = 0
+        for a in argv[i + 1:]:
+            try:
+                nums.append(int(a, 0))
+                consumed += 1
+            except ValueError:
+                break
+            if len(nums) == 3:
+                break
+        if len(nums) != 3:
+            print("--compare takes BLOCK_A BLOCK_B BYTES")
+            return 2
+        blkargs = ("compare", nums[0], nums[1], nums[2])
+        del argv[i:i + 1 + consumed]
+
     if "--node" in argv:
         i = argv.index("--node")
         nodeargs = []
@@ -516,6 +553,10 @@ def main():
             if printable:
                 print("      first 8 bytes are text: %r" % probe[:8].decode("latin-1"))
 
+    if blkargs is not None and blkargs[0] == "compare":
+        print()
+        compare_regions(img, blocksize, blkargs[1], blkargs[2], blkargs[3])
+        return 0
     if blkargs is not None:
         print()
         dump_block(img, blocksize, blkargs[0], blkargs[1], blkargs)
