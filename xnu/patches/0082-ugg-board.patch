@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..a508aa5 100644
+index 6b926fe..1b46184 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -559,7 +559,7 @@ index 6b926fe..a508aa5 100644
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -583,6 +1031,271 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+@@ -583,6 +1031,280 @@ static const struct cdevsw sweet_ufs_cdevsw = {
  	.d_type       = D_DISK,
  };
  
@@ -591,8 +591,17 @@ index 6b926fe..a508aa5 100644
 +	 * No external reference is needed, and neither shape is trusted.
 +	 */
 +	static uint8_t big[BOUNCE_SIZE] __attribute__((aligned(64)));
-+	/* 1 MiB starting at the catalog node the kernel rejects (node 19174). */
-+	uint64_t first = 1734912;
++	/*
++	 * 1 MiB starting at the catalog node the kernel rejects (node 19174).
++	 *
++	 * That node lives in ext3, which starts at volume block 1729347, at
++	 * 1729347 + (19174 - 16384) * 2 = 1734927 (8 KiB nodes, 4 KiB blocks).
++	 * This used to say 1734912 -- 15 blocks low. A 1 MiB read still covers the
++	 * node, so the measurement itself was sound, but the printed block number
++	 * disagreed with the hand calculation and sent readers looking for an
++	 * offset bug that was not there. Numbers in diagnostics have to be right.
++	 */
++	uint64_t first = 1734927;
 +	uint32_t blocks = BOUNCE_SIZE / UFS_BLOCK;
 +
 +	{
@@ -831,7 +840,7 @@ index 6b926fe..a508aa5 100644
  static int
  sweet_ufs_init(void)
  {
-@@ -592,9 +1305,16 @@ sweet_ufs_init(void)
+@@ -592,9 +1314,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -848,7 +857,7 @@ index 6b926fe..a508aa5 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -606,8 +1326,18 @@ sweet_ufs_init(void)
+@@ -606,8 +1335,18 @@ sweet_ufs_init(void)
  	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
@@ -867,7 +876,7 @@ index 6b926fe..a508aa5 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1353,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1362,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -882,7 +891,7 @@ index 6b926fe..a508aa5 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1383,44 @@ sweet_ufs_init(void)
+@@ -651,15 +1392,44 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -930,7 +939,7 @@ index 6b926fe..a508aa5 100644
  	return 0;
  }
  
-@@ -669,7 +1430,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1439,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -939,7 +948,7 @@ index 6b926fe..a508aa5 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1439,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1448,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -948,7 +957,7 @@ index 6b926fe..a508aa5 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1497,126 @@ struct sweet_log_header {
+@@ -736,66 +1506,126 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -1109,7 +1118,7 @@ index 6b926fe..a508aa5 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1626,114 @@ sweet_log_start(void)
+@@ -805,6 +1635,114 @@ sweet_log_start(void)
  	}
  }
  
