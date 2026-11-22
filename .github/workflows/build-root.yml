@@ -172,7 +172,16 @@ jobs:
           # After umount, work/mnt is an empty directory and every file would look
           # missing -- a guaranteed false failure that reads like the real bug.
           sync
-          sh ./tools/check-boot-files.sh work/mnt
+          # Save the output to a file as well as to the log. The GitHub job-log API
+          # has been returning 100 bytes for this repository, so a check whose answer
+          # only reaches the log cannot be read back afterwards -- it would run and
+          # its result would be lost. boot-files.txt ships as an artifact.
+          #
+          # The exit status is preserved with 'set -o pipefail' rather than
+          # PIPESTATUS: the latter is bash-specific and a stray quote in it has
+          # already broken this file once.
+          set -o pipefail
+          sh ./tools/check-boot-files.sh work/mnt 2>&1 | tee boot-files.txt
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
@@ -267,6 +276,7 @@ jobs:
         with:
           name: hfs-check
           path: |
+            boot-files.txt
             hfs-check.txt
             hfs-check-sparse.txt
           retention-days: 30
