@@ -1,0 +1,87 @@
+UGG 内核日志提取说明（TWRP + Windows CMD）
+==========================================
+
+你需要把下面这些放在同一个文件夹里：
+
+    pull-log.cmd            双击这个
+    ugg-grab-log.sh         手机端脚本（会自动推上去）
+    sweetlog-decode.ps1     电脑端解码器（会自动调用）
+    adb.exe                 你自己放进去
+    AdbWinApi.dll           和 adb.exe 一起
+    AdbWinUsbApi.dll        同上
+
+后三个从 Android platform-tools 里拷：
+https://developer.android.com/tools/releases/platform-tools
+
+
+怎么用
+------
+
+1. 手机进 TWRP。
+2. 数据线连电脑。TWRP 里 Mount 能读到分区即可。
+3. 双击 pull-log.cmd。
+
+4. 成功时最后会出现类似：
+
+        header : version 1, ring 4194304 bytes, total 12345 bytes, flush #7
+
+   或者（如果抓取偏移略偏，解码器会自己找回来）：
+
+        note   : header found 3584 bytes in, realigning
+        header : version 1, ...
+
+5. 结果在 out\ 里：
+
+        out\sweetlog.bin         原始 4 MiB 转储
+        out\kernel-console.txt   解码后的可读文本
+
+   把 kernel-console.txt 发给我。没有它就把 .bin 一起发。
+
+
+原理
+----
+
+内核把控制台所有字符存进一个 4 MiB 环形缓冲，连同 4 KiB 头，写在
+userdata 分区**最后 1025 个 4 KiB 块**里，共 4,198,400 字节。
+
+  偏移 0     "SWEETLOG"
+  偏移 8     version (1)
+  偏移 12    ring size (4194304)
+  偏移 16    total 已写入字节数
+  偏移 24    flush 序号
+  偏移 4096  环形缓冲本体
+
+重要：偏移必须按 4 KiB 块算整（内核就是这么算的），不能用“总扇区减 8200”。
+这台手机 userdata 是 111,132,639 个 512 字节扇区，不是 8 的整数倍，
+直接减会差 7 个扇区（3584 字节），正好错过文件头 —— 表现就是读出来全是 0。
+脚本里已经按正确公式算了。
+
+
+如果失败
+--------
+
+   没有 [1/6]            adb.exe 不在这个文件夹
+   No device listed      手机没连上 / 充电线 / TWRP 里重新插一次
+   by-name not usable    分区路径不同，脚本会列出候选，把输出发我
+   [X] no SWEETLOG header 区里确实没有日志（内核没写成功）
+
+
+手工三条命令（脚本跑不动时用，在 cmd 里 cd 到本文件夹）：
+
+    adb.exe shell blockdev --getsz /dev/block/bootdevice/by-name/userdata
+
+  第一条打印总扇区数 SZ。然后：
+
+    # skip = (SZ / 8 - 1025) * 8      <- 注意是块对齐，不是 SZ-8200
+    adb.exe shell dd if=/dev/block/bootdevice/by-name/userdata of=/sdcard/sweetlog.bin bs=512 skip=SKIP count=8200
+    adb.exe pull /sdcard/sweetlog.bin
+
+  例如 SZ=111132639：111132639/8=13891579（取整），
+  (13891579-1025)*8 = 111124432，所以 skip=111124432。
+
+
+备注
+----
+
+全程只读，不写手机任何分区，TWRP 里随便跑。
+
