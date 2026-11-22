@@ -160,14 +160,19 @@ jobs:
           ./tools/mkiosroot.sh \
             work/ipswext/OS.dmg work/ipswext/SYSTEMOS.dmg work/ipswext/APPOS.dmg \
             work/ios16-root.img 16G
-          sudo fsck.hfsplus -fy work/ios16-root.img || true
+          sudo fsck.hfsplus -fy work/ios16-root.img
+
 
       - name: Apply the bring-up tweaks
         run: |
           sudo mkdir -p work/mnt
           sudo mount -t hfsplus -o loop,force work/ios16-root.img work/mnt
           sudo python3 ./tools/sweet-root-tweaks.py work/mnt
+          # Check the boot-critical files WHILE THE VOLUME IS STILL MOUNTED.
+          # After umount, work/mnt is an empty directory and every file would look
+          # missing -- a guaranteed false failure that reads like the real bug.
           sync
+          sh ./tools/check-boot-files.sh work/mnt
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
