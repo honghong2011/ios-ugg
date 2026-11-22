@@ -38,6 +38,16 @@ echo "boot-critical files under $ROOT:"
 for f in sbin/launchd usr/lib/dyld bin/sh \
          System/Library/xpc/launchd.plist \
          private/var private/etc private/var/db; do
+    # Check for a SYMLINK first. iOS makes /bin/sh a link to /bin/bash, and the
+    # kernel resolves that inside the mount while a userspace stat follows an
+    # absolute target against the HOST root. So [ -e ] alone reports nonsense for
+    # linked entries: it can say MISSING for a perfectly good image, or find the
+    # runner's own /bin/bash and say present. A symlink counts as present; its
+    # target is reported so the reader can judge it.
+    if [ -L "$ROOT/$f" ]; then
+        printf "  present  %-30s (symlink -> %s)\n" "$f" "$(readlink "$ROOT/$f")"
+        continue
+    fi
     if [ -e "$ROOT/$f" ]; then
         if [ -f "$ROOT/$f" ]; then
             # Size, mode and ownership all matter. mido's notes record the requirement
