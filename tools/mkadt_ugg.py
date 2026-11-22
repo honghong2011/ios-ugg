@@ -153,8 +153,17 @@ def build(seed=None, product_path=None, qemu=False):
     # be compared. Derive it from the identity instead: unique per board, and
     # identical on every rebuild, which is what makes "did my change alter the
     # image?" answerable with a sha256.
-    seed = seed if seed is not None else hashlib.sha384(
-        ('ugg-adt-seed/' + TARGET + '/' + MODEL).encode()).digest()[:64]
+    #
+    # The length is NOT free. osfmk/prng/prng_random.c:59 panics unless
+    # PE_get_random_seed() returns at least 64 bytes --
+    #   "Expected %lu seed bytes from bootloader, but got %u."
+    # An earlier version of this line used sha384, which is 48 bytes, and every
+    # image built from it panicked in early boot. sha512 gives exactly 64.
+    seed = seed if seed is not None else hashlib.sha512(
+        ('ugg-adt-seed/' + TARGET + '/' + MODEL).encode()).digest()
+    if len(seed) < 64:
+        raise SystemExit('ADT random-seed must be at least 64 bytes (got %d); '
+                         'prng_random.c panics otherwise' % len(seed))
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
 
