@@ -135,8 +135,13 @@ jobs:
           # (45032399238) had text only because it died before that handover, and it
           # also had faults. So: text on screen = probably died early; blank screen +
           # many IRQs + no faults = reached the idle loop.
-          if [ -s qout/fb.txt ]; then
+          # -s is true for a file holding a single newline, which is exactly what a
+          # blank screen decodes to (fb.txt is 1 byte), so test for non-whitespace
+          # content instead. Otherwise the warning fires on every healthy run and
+          # trains everyone to ignore it.
+          if [ -f qout/fb.txt ] && grep -q '[^[:space:]]' qout/fb.txt; then
             echo "::warning title=qemu-text-on-screen::console text is still visible -- the kernel may have died before the framebuffer took over"
+            grep -m5 '[^[:space:]]' qout/fb.txt || true
           fi
           echo "::notice title=qemu-ok::$irqs IRQs, 0 faults, screen blank (expected once the framebuffer owns the display)"
           # Where is the CPU parked? A healthy boot idles in machine_idle/cpu_idle.
