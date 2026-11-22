@@ -187,6 +187,16 @@ jobs:
           # the 5.8 GB of parts.
           sh ./tools/check-boot-files.sh work/mnt 2>&1 | tee boot-files.txt
           sh ./tools/image-manifest.sh work/mnt work/image-manifest.txt 2>&1 | tee -a boot-files.txt
+          # Resolve the two paths the kernel actually tries to exec. This walks the
+          # catalog the same way the kernel does, so it answers 'is the file there
+          # and is it a Mach-O' rather than 'a file with that name exists somewhere'.
+          # A missing path here means errno 5 on the phone is NOT only about the
+          # catalog, which would change what to fix.
+          for p in /sbin/launchd /usr/lib/dyld; do
+            echo "--- catalog lookup: $p"
+            python3 ./tools/hfs-find.py work/ios16-root.img "$p" >> boot-files.txt 2>&1 \
+              || echo "::warning title=catalog-lookup::could not resolve $p"
+          done
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
