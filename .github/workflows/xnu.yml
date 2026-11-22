@@ -77,6 +77,13 @@ jobs:
           xcodebuild -version
           xcrun --find iig
 
+      - name: Check the touch coordinate maths
+        # The transform was wrong twice (normalising 720-wide values by 1080, then by
+        # the 750-wide canvas). Both compiled, both looked right, and both could only
+        # be caught by arithmetic or by tapping a phone. This runs the arithmetic.
+        run: |
+          python3 tools/check-touch-math.py
+
       - name: Build
         working-directory: dxb
         env:
