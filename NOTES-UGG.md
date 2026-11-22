@@ -1,6 +1,110 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-22 13:50，第 42 轮）-- **找到真因：PIO 路径从不维护 D-cache**
+## ★★★★★ 最新（2026-11-22 16:30，第 43 轮）-- **根因在刷写工具，不在内核**
+
+### 0104 结果：读取大小不是原因
+
+```
+UGG SIZE: one 1024 KiB transfer at block 1734912
+UGG SIZE: same region as 256 separate 4 KiB reads
+UGG SIZE: identical -- read size is not the fault
+UGG SIZE: node 19174 small-read fLink=0xf800ebf3 kind=0xf7
+```
+
+三种读法（1 MiB 单次、256 次 4 KiB、单节点 2 块）读到的坏值
+**完全相同**。
+
+### 完整排除清单
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| 日志区覆盖 | 偏移计算 | 相距 49 GB，否 |
+| 多块传输 | `uggnomb=1` | 无变化 |
+| D-cache | 加 clean/flush | 无变化 |
+| 稀疏展开 | 换 raw 刷 | 坏值变了但仍坏 |
+| **读取大小** | 1 MiB vs 4 KiB | **identical** |
+| HFS 写坏 | ugcheck 在挂载前跑 | 数值早于挂载 |
+| **镜像本身** | `--node` 查 | **四个节点全 VALID** |
+| **转换脚本** | `check-raw.py` | **raw 文件完全正确** |
+
+### 真正的根因：fastboot 没有写进我们的数据
+
+`check-raw.py ios16-root.img` 输出：
+
+```
+size : 17179869184 (expect 17179869184)
+offset 0x1a790f000 (block 1734927):
+  first 16 bytes : 00 00 4a f9 00 00 00 05 ff 01 00 17 00 00 00 06
+  fLink=0x00004af9 bLink=0x00000005 kind=0xff
+  -> the raw file is CORRECT
+```
+
+而手机读到的是 `0xf800ebf3`。**同一偏移，不同字节。**
+
+看 fastboot 自己的输出：
+
+```
+Invalid sparse file format at header magic          <- 它把 raw 当 sparse 解析了
+Sending sparse 'userdata' 1/24  (496560 KB)
+Sending sparse 'userdata' 24/24 (4853 KB)
+```
+
+算一下总传输量：
+
+| 项 | 值 |
+|---|---|
+| 24 个分片求和 | **11.15 GiB** |
+| 16 GiB raw 应该 | 16.00 GiB |
+| **少了** | **4.85 GiB（只有 69.7%）** |
+
+分片大小从 4853 KB 到 523262 KB、**极不均匀**，
+不可能是 16 GiB 均分（每份应为 699050 KB）。
+
+**这 24 个大小，正好是 `.simg` 稀疏镜像里各 chunk 的大小。**
+
+### 结论
+
+1. `simg2img.py` 转出来的 raw **完全正确**
+2. `fastboot` 收到 raw 后，用**旧版 ABL 有缺陷的 sparse 解析器**处理
+3. 结果只写了 11.15 GiB，且位置错乱
+4. 换 raw 后坏值变了但仍坏 → 只是换了另一种错法
+
+### 下一步：绕开 fastboot 的 sparse 解析
+
+**方案 A：用 `.simg` 分片逐个刷入**（推荐）
+
+build-root.yml 已经把 `.simg` 切成 1800 MB 的 `.part*` 文件，
+它们是纯 sparse、每个都能被 fastboot 正确理解：
+
+```
+fastboot flash userdata ios16-root.simg
+```
+
+（而不是拼接后的大文件）
+
+**方案 B：用 `fastboot -S` 明确告知分块**
+
+```
+fastboot -S 256M flash userdata ios16-root.img
+```
+
+**方案 C：用 TWRP 直接 dd**（最可靠）
+
+```
+adb push ios16-root.img /sdcard/     # 16 GiB，很慢
+adb shell dd if=/sdcard/ios16-root.img of=/dev/block/sda38 bs=1M
+```
+
+### 验证方法
+
+刷完不启动，直接看 `fastboot` 的总传输量：
+
+- **应该接近 16 GiB（约 16384 MB）**
+- 如果又是 11 GiB 左右，说明还是没写完
+
+---
+
+## （2026-11-22 13:50，第 42 轮）-- **找到真因：PIO 路径从不维护 D-cache**
 
 ### raw 镜像刷写成功了
 
