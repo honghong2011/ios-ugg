@@ -342,8 +342,52 @@ def check_btree(img, fork, blocksize, label, walk_all=True):
     return problems
 
 
+def dump_block(img, blocksize, block, count, blkargs):
+    """Print raw bytes of the image at a given allocation block."""
+    off = block * blocksize
+    data = img.read(off, count)
+    print("image block %d = byte offset %d (0x%x), %d bytes" % (block, off, off, len(data)))
+    for i in range(0, len(data), 16):
+        row = data[i:i + 16]
+        hexs = " ".join("%02x" % c for c in row)
+        text = "".join(chr(c) if 32 <= c < 127 else "." for c in row)
+        print("  %08x  %-47s  %s" % (i, hexs, text))
+    if len(data) >= 10:
+        f1 = be32(data, 0)
+        f2 = be32(data, 4)
+        kind = data[8]
+        print()
+        print("  as a b-tree node descriptor: fLink=0x%08x bLink=0x%08x kind=0x%02x"
+              % (f1, f2, kind))
+        if kind in (0, 1, 2, 0xFF):
+            print("  -> this WOULD validate as a node")
+        else:
+            print("  -> this would NOT validate; kind %d is not a b-tree kind" % kind)
+            print("  -> first 8 bytes as text: %r" % data[:8].decode("latin-1"))
+
+
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    blkargs = None
+    argv = sys.argv[1:]
+    if "--dump" in argv:
+        i = argv.index("--dump")
+        rest = argv[i + 1:]
+        nums = []
+        consumed = 0
+        for a in rest:
+            try:
+                nums.append(int(a, 0))
+                consumed += 1
+            except ValueError:
+                break
+            if len(nums) == 2:
+                break
+        if not nums:
+            print("--dump needs a block number and an optional byte count")
+            return 2
+        blkargs = (nums[0], nums[1] if len(nums) > 1 else 256)
+        del argv[i:i + 1 + consumed]
+    args = [a for a in argv if not a.startswith("-")]
     walk_all = "--all" in sys.argv
     if walk_all:
         args = [a for a in args if a != "--all"]
@@ -356,6 +400,9 @@ def main():
     print("check-hfs-root.py -- %s" % path)
     print("=" * 72)
     if not os.path.exists(path):
+        print("no such file: %s" % path)
+        return 2
+    if blkargs is not None and not os.path.exists(path):
         print("no such file: %s" % path)
         return 2
 
@@ -414,6 +461,11 @@ def main():
                   % (label, i, start, fl, bl, kind, verdict))
             if printable:
                 print("      first 8 bytes are text: %r" % probe[:8].decode("latin-1"))
+
+    if blkargs is not None:
+        print()
+        dump_block(img, blocksize, blkargs[0], blkargs[1], blkargs)
+        return 0
 
     print()
     print("B-trees")
