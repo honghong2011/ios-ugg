@@ -132,6 +132,42 @@ def main():
     print(out.strip()[-800:])
     results.append(('check-touch-math', rc, line))
 
+    # Cross-check: the boot-files check resolves paths through the kernel's own HFS
+    # driver, while hfs-find walks the catalog b-tree in userspace. When a log (or a
+    # boot-files.txt) is supplied alongside an image, agreement between them is
+    # meaningful and disagreement has a known tie-breaker.
+    bot = None
+    for p in (os.path.join(os.path.dirname(log), 'boot-files.txt') if log else '',):
+        if p and os.path.exists(p):
+            bot = p
+    if bot:
+        section('cross-check: kernel-side vs userspace path resolution')
+        txt = open(bot, encoding='utf-8', errors='replace').read()
+        for name in ('sbin/launchd', 'usr/lib/dyld'):
+            kernel_says = None
+            for line in txt.splitlines():
+                if name in line and 'present' in line:
+                    kernel_says = True
+                if name in line and 'MISSING' in line:
+                    kernel_says = False
+            if kernel_says is None:
+                continue
+            user_says = None
+            for n, rc, _l in results:
+                if n == 'hfs-find /%s' % name and rc is not None:
+                    user_says = (rc == 0)
+            if user_says is None:
+                continue
+            agree = (kernel_says == user_says)
+            print('  %-16s kernel=%-7s userspace=%-7s %s'
+                  % (name, 'present' if kernel_says else 'MISSING',
+                     'found' if user_says else 'NOT FOUND',
+                     'agree' if agree else 'DISAGREE'))
+            if not agree:
+                print('    ^ trust the kernel side: it resolves through the driver that')
+                print('      just mounted the volume, and every successful mount exercises it.')
+                print('      The userspace walker is the suspect.')
+
     section('SUMMARY')
     # Exit status is not uniform across these tools, and pretending it is would make
     # the summary lie -- which is the exact failure this whole project keeps hitting.
