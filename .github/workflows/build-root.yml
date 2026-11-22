@@ -35,6 +35,17 @@ on:
         description: 'Split size for the sparse image parts (MB)'
         default: '1800'
 
+# A root image build is expensive: IPSW download, apfs-fuse build, a 16 GiB
+# filesystem, several GiB of artifacts. Without a concurrency group, a push and a
+# manual dispatch seconds apart start two full builds of the same commit, which is
+# what happened and had to be cancelled by hand.
+#
+# cancel-in-progress is false on purpose: killing a build half way through leaves
+# partial artifacts and wastes everything already spent. Queue instead.
+concurrency:
+  group: build-root-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-24.04
