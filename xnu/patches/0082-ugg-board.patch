@@ -1269,10 +1269,10 @@ index 6b926fe..0d3856d 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..2b6e775
+index 0000000..a7370f8
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,541 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
@@ -1471,12 +1471,19 @@ index 0000000..2b6e775
 + * from the pointer with a fresh start.
 + */
 +/*
-+ * Probe the QUP once, with a hard deadline, before trusting any read.
++ * Cheap liveness probe before any transfer, with a hard deadline.
 + *
-+ * qup_xfer() already gives each phase its own deadline, but a bus whose clock
-+ * is gated can make the controller never raise ANY status bit, and the two
-+ * waits then add up on a path that runs during startup. One bounded probe
-+ * tells us whether the controller is alive at all.
++ * Be clear about what this catches, because the name oversells it: ST_VALID is a
++ * "the status register can be read" bit, so it is set on an idle controller too. This
++ * therefore only detects the case where Q_STATE reads back without it -- an
++ * unclocked or wedged bus returning 0 or a stuck value. It does NOT prove the
++ * controller is initialised, that a transfer can complete, or that the touch chip is
++ * present.
++ *
++ * It earns its place because that one case is common here and each qup_xfer() then
++ * costs two full timeouts on the boot path. The real verdict comes from the
++ * gt_read(GT_REG_PRODUCT) immediately after, which runs a whole transfer and returns
++ * an error code.
 + */
 +static int
 +qup_alive(void)
