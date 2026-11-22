@@ -70,8 +70,11 @@ jobs:
         run: |
           set -e
           python3 tools/mkadt_ugg.py k/ugg-qemu.adt --qemu
+          # No sweetfb_noconsole here. The phone image sets it to keep the console
+          # off the panel, but this check exists to READ the console: with it set,
+          # the run decodes to an empty screen and the check is green and blind.
           CMDLINE="debug=0xc cpus=1 keepsyms=1 -v -noprogress ugg_vcscale=2"
-          CMDLINE="$CMDLINE sweetfb_noconsole=1 sweetfb_hz=30 ugginput=0"
+          CMDLINE="$CMDLINE sweetfb_hz=30 ugginput=0"
           python3 tools/mkpayload.py k/kernel.development.sweet k/ugg-qemu.adt k/payload.bin --cmdline "$CMDLINE"
           ls -l k/
 
