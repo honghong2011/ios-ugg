@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..0d3856d 100644
+index 6b926fe..ec7d2cf 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -559,7 +559,7 @@ index 6b926fe..0d3856d 100644
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -583,6 +1031,314 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+@@ -583,6 +1031,328 @@ static const struct cdevsw sweet_ufs_cdevsw = {
  	.d_type       = D_DISK,
  };
  
@@ -704,7 +704,21 @@ index 6b926fe..0d3856d 100644
 +static void
 +ugg_check_btree(void)
 +{
-+	uint32_t mode = 1;
++	/*
++	 * Default OFF, and it used to default on.
++	 *
++	 * The walk is pure diagnosis -- it reads and reports, it fixes nothing -- and it
++	 * costs 20480 nodes x 8192 B = 160 MiB of reads, 40960 block transfers, in
++	 * single-block mode (one CMD17 each), on EVERY boot, before vfs_mountroot. That
++	 * is a lot of I/O in the most fragile part of the boot, spent printing something
++	 * nobody reads unless the volume is already suspect.
++	 *
++	 * It did earn its place: it produced the ext0-clean / ext2-bad boundary that
++	 * located the damage, and the first-bad/last-good line added later pins it to a
++	 * single node. Keep it, but behind an explicit ugcheck=1, the way a diagnostic
++	 * should be. Boot with ugcheck=1 to reproduce the previous behaviour exactly.
++	 */
++	uint32_t mode = 0;
 +	PE_parse_boot_argn("ugcheck", &mode, sizeof(mode));
 +	if (!mode) {
 +		return;
@@ -874,7 +888,7 @@ index 6b926fe..0d3856d 100644
  static int
  sweet_ufs_init(void)
  {
-@@ -592,9 +1348,16 @@ sweet_ufs_init(void)
+@@ -592,9 +1362,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -891,7 +905,7 @@ index 6b926fe..0d3856d 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -606,8 +1369,18 @@ sweet_ufs_init(void)
+@@ -606,8 +1383,18 @@ sweet_ufs_init(void)
  	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
@@ -910,7 +924,7 @@ index 6b926fe..0d3856d 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1396,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1410,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -925,7 +939,7 @@ index 6b926fe..0d3856d 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1426,44 @@ sweet_ufs_init(void)
+@@ -651,15 +1440,44 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -973,7 +987,7 @@ index 6b926fe..0d3856d 100644
  	return 0;
  }
  
-@@ -669,7 +1473,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1487,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -982,7 +996,7 @@ index 6b926fe..0d3856d 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1482,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1496,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -991,7 +1005,7 @@ index 6b926fe..0d3856d 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1540,126 @@ struct sweet_log_header {
+@@ -736,66 +1554,126 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -1152,7 +1166,7 @@ index 6b926fe..0d3856d 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1669,114 @@ sweet_log_start(void)
+@@ -805,6 +1683,114 @@ sweet_log_start(void)
  	}
  }
  
