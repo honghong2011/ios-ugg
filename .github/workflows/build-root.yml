@@ -160,6 +160,33 @@ jobs:
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
+      - name: Validate the volume before shipping it
+        # Until now this workflow hashed the image and uploaded it without ever
+        # checking that the filesystem on it is usable. A hash proves the bytes did
+        # not change in transit; it says nothing about whether they form a valid
+        # volume. The ugg port has spent many rounds chasing an HFS corruption that
+        # was only ever seen on the phone, so the cheapest possible guard is to run
+        # the same B-tree check here, on the image as built.
+        #
+        # fsck above already checks structure, but our checker is what the kernel
+        # effectively does (descriptor links vs totalNodes), and it reads the sparse
+        # file in place, so this also proves the sparse encoding round-trips.
+        run: |
+          # Key on the tool's exit status, not a grep of its output: the healthy
+          # report contains the line 'BAD NODES    : 0', so grepping for 'bad'
+          # fails every good build. Exit status is 0 sane, 1 problems, 2 usage.
+          # Write the log with tee but take the status from the checker itself, so
+          # no shell pipeline details are involved.
+          if python3 ./tools/check-hfs-root.py --all work/ios16-root.img > hfs-check.txt 2>&1; then
+            tail -20 hfs-check.txt
+            echo "::notice title=hfs-check::every b-tree node looked sane"
+          else
+            rc=$?
+            tail -40 hfs-check.txt
+            echo "::error title=hfs-check::b-tree check failed (exit $rc) -- see hfs-check.txt"
+            exit 1
+          fi
+
       - name: Convert to sparse and split
         run: |
           img2simg work/ios16-root.img work/ios16-root.simg
@@ -174,6 +201,20 @@ jobs:
           ls -l work/parts | head -20
           (cd work/parts && sha256sum * > SHA256SUMS)
           cat work/parts/SHA256SUMS
+          # The image that ships is the sparse one, so check THAT too: img2simg
+          # could in principle produce a valid-looking sparse file whose expansion
+          # differs. This is the last point at which that can be caught without a
+          # phone.
+          echo "--- re-check through the sparse encoding ---"
+          if python3 ./tools/check-hfs-root.py --all work/ios16-root.simg > hfs-check-sparse.txt 2>&1; then
+            tail -5 hfs-check-sparse.txt
+            echo "::notice title=hfs-check-sparse::sparse image passes too"
+          else
+            rc=$?
+            tail -40 hfs-check-sparse.txt
+            echo "::error title=hfs-check-sparse::the SPARSE image fails the b-tree check (exit $rc)"
+            exit 1
+          fi
 
       - name: Report
         if: always()
