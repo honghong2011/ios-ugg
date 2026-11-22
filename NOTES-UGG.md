@@ -54,6 +54,34 @@ IRQ < 5                                                    → 失败（内核�
 qemu-ok :: 370 IRQs, 0 faults, screen blank (expected once the framebuffer owns the display)
 \`\`\`
 
+### 判读逻辑已抽成脚本（`tools/qemu-verdict.py`）
+
+抽出来的直接原因很蠢：我把判读内联在 YAML 的 heredoc 里，
+**heredoc 的内容掉了缩进，整个 workflow 直接变成非法 YAML**。
+
+但真正的理由是：内联在 CI 配置里的判断
+
+- 没法本地跑（拿到 artifact 也没法验）
+- 没人读得到（除非去翻 CI 配置）
+- 没法测（改完只能推上去看绿不绿）
+
+抽成脚本后，**先用两个真实 artifact 验过才上线**：
+
+| artifact | 来源 | 期望 | 实际 |
+|---|---|---|---|
+| `qemu-out` | 45032399238（种子 bug） | 失败 | `exit 1`，`kernel faulted 7 time(s)` |
+| `qemu-out5` | 45035153390（修好） | 通过 | `exit 0`，`366 IRQs, 0 faults, screen blank` |
+
+上线后 CI 45035552411 的真实输出：
+
+```
+qemu-ok :: 369 IRQs, 0 faults, screen blank (expected)
+```
+
+> 这又是同一条纪律：**能在本地验的，不要只在 CI 上验。**
+> 之前栽过的是 `verify-flash.sh` 的偏移、`check-hfs-root.py` 的魔数、
+> `ppcheck.py` 的分支计数 —— 这次是 workflow 的 YAML 和判读规则。
+
 ---
 
 ## （2026-11-22 22:30，第 45 轮）-- **QEMU 立刻抓出我自己写的一个致命 bug**
