@@ -124,7 +124,13 @@ def open_image(path):
 
 
 def adb(args, timeout=None):
-    return subprocess.run(["adb"] + args, capture_output=True, timeout=timeout)
+    try:
+        return subprocess.run(["adb"] + args, capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        # Say so plainly: a traceback here reads like the tool is broken, and the
+        # actual cause is only that adb is not on PATH (or not next to the tool).
+        sys.exit("adb not found on PATH. Install Android platform-tools, or put "
+                 "adb.exe next to this script, then retry.")
 
 
 def read_card(off, length):
