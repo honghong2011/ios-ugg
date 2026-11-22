@@ -132,20 +132,38 @@
 #define IMEM_STAGE		0x08600600UL
 
 /*
- * Touch rail and performance boost are OFF until this board's own regulator ids
- * are identified.
+ * Touch rail and performance boost are OFF by default.
  *
  * Both reach into the RPM, and rpm.c documents that a write the arbiter does
  * not expect RESETS THE SoC. The console photograph of the first scrolling
  * build stops at "REOPEN: TX ST=2 RX ST=2" -- immediately before the L10 vote
  * that input_setup() performs -- and the phone then rebooted with nothing else
- * printed. L10 is mido's touch rail, not necessarily ugg's.
+ * printed.
+ *
+ * That reasoning was partly WRONG, and the correction matters for touch:
+ *
+ *   The L10 vote was suspected because "L10 is mido's rail, not necessarily
+ *   ugg's". Parsing this board's own DT (ugg/tools/dtb-find.py on
+ *   device-dumps/msm8937-dtbundle.bin) shows goodix_ts@5d vdd_ana-supply ->
+ *   phandle 0xd3 -> rpm-regulator-ldoa10, i.e. L10 IS ugg's touch rail. The
+ *   same node's vcc_i2c-supply -> 0xc1 -> rpm-regulator-ldoa5, which is why
+ *   input.c used to read 0xFF on the bus: it was voting L6.
+ *
+ * So the old justification does not hold. But the reset is still unexplained --
+ * the same capture contains "LOG WRITE E", a failed log write, and the reset may
+ * come from there instead. Turning the rail on is therefore a TEST, not a fix:
+ * flip it with -DBOARD_TOUCH_RAIL=1 (build.sh forwards EXTRA_CFLAGS) and see
+ * whether the phone still boots. The default stays off so the boot path is not
+ * changed silently by a source edit.
  *
  * Neither is needed to reach iOS: touch matters for USING it, not booting it.
- * So both wait behind these switches.
  */
+#ifndef BOARD_TOUCH_RAIL
 #define BOARD_TOUCH_RAIL	0
+#endif
+#ifndef BOARD_PERF_BOOST
 #define BOARD_PERF_BOOST	0
+#endif
 
 #define TLMM_BASE	0x01000000UL
 
