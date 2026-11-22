@@ -21,6 +21,13 @@
 # every catalog observation is secondary and this is the real bug.
 #
 # Exit status: 0 the boot-critical files are present, 1 one is missing, 2 bad usage.
+#
+# A note on where this can be trusted: the mode check parses the octal mode from
+# stat(1) instead of using 'test -x', because on MSYS (the Windows shell used to
+# develop this) -x returns TRUE for a 644 file. That was not hypothetical -- it made
+# this script report a non-executable launchd as fine. Windows filesystems also do not
+# carry POSIX modes at all, so on that host the mode column is not meaningful and this
+# script can only be validated for real on Linux, which is where CI runs it.
 set -u
 
 ROOT=${1:?usage: check-boot-files.sh IMAGE_MOUNTPOINT}
@@ -33,10 +40,31 @@ for f in sbin/launchd usr/lib/dyld bin/sh \
          private/var private/etc private/var/db; do
     if [ -e "$ROOT/$f" ]; then
         if [ -f "$ROOT/$f" ]; then
-            # size and exec bit are both worth seeing: launchd must be executable
+            # Size, mode and ownership all matter. mido's notes record the requirement
+            # for these two as 'root:wheel 0755': launchd is executed as PID 1, so an
+            # unexpected owner or a missing exec bit is a silent failure that looks
+            # exactly like a filesystem problem later.
             sz=$(wc -c < "$ROOT/$f" 2>/dev/null || echo '?')
-            if [ -x "$ROOT/$f" ]; then x=exec; else x=NOT-EXEC; fi
-            echo "  present  $f  ($sz bytes, $x)"
+            # Do NOT use "test -x". On MSYS (this project's Windows shell) -x returns
+            # true for a file with mode 644, so a launchd missing its exec bit would
+            # pass silently -- the exact silent failure this check exists to catch.
+            # Decide from the numeric mode, and treat unknown as unknown, not as fine.
+            mode=$(stat -c '%a' "$ROOT/$f" 2>/dev/null || echo '')
+            owner=$(stat -c '%U:%G' "$ROOT/$f" 2>/dev/null || echo '?')
+            case "$mode" in
+                '')     x=UNKNOWN-MODE ;;
+                *[1357]) x=exec ;;
+                *)       x=NOT-EXEC ;;
+            esac
+            echo "  present  $f  (${sz} bytes, mode ${mode}, $owner, ${x})"
+            case "$f" in
+                sbin/launchd|usr/lib/dyld)
+                    if [ "$x" = NOT-EXEC ]; then
+                        echo "           ^ NOT EXECUTABLE: the kernel cannot exec this"
+                        missing=1
+                    fi
+                    ;;
+            esac
         else
             echo "  present  $f  (directory)"
         fi
