@@ -94,6 +94,21 @@ def main():
             break
         clean_end = (s + c) * BS
 
+    if clean_end is None:
+        # The first extent is already damaged, so there is no clean prefix. Saying
+        # so is the whole answer: nothing before the damage can be used as an anchor,
+        # so a part-boundary argument cannot be applied at all. Crashing here with a
+        # TypeError (as this used to) told the reader nothing and looked like the
+        # tool was broken rather than the device.
+        print('the FIRST extent is already damaged at node %d (%.3f GiB).'
+              % (first_bad_node, off / 2 ** 30))
+        print()
+        print('There is no clean prefix, so there is no bracket to compare against')
+        print('part boundaries. The damage starts at or before the beginning of the')
+        print('catalog, which points at the write never completing its start -- or at')
+        print('the volume header area itself. verify-card.py --map from offset 0')
+        print('settles where it begins.')
+        return 1
     lo_gib = clean_end / 2 ** 30
     hi_gib = off / 2 ** 30
     print('damage bracketed by:')
