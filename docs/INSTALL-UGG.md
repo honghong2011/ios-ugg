@@ -207,72 +207,115 @@ adb shell "blkid /dev/block/bootdevice/by-name/userdata"
 
 **关键：目标分区是 `userdata`，不是 `system`。**
 
-### 5.1 方式 A：fastboot（推荐，最快）
+> **只刷 `.simg`，一条命令。** 这一节 2026-11-22 重写过：
+> 之前的版本让你先 `simg2img` 转 raw、再用自写的分块脚本一点点 dd 进去 ——
+> 那条路在本机从来没成功过（`adb exec-in dd` 静默不写、`/sdcard`
+> 就住在 userdata 上塞不进 16 GiB、TWRP 的 dd 不接受 `1M` 后缀），
+> 相关脚本已删除。**mido 的刷法就是下面这一条，照做即可。**
+
+### 5.1 唯一推荐的写法
 
 ```bash
 # 手机先进 fastboot
 adb reboot bootloader
 
-# 分块刷，避免一次传 12 GB 被 USB 缓冲打断
-fastboot -S 256M flash userdata ios16-root.img
+# 直接刷稀疏镜像。mido 用的就是这条，24-25 片，约 5-8 分钟。
+fastboot -S 512M flash userdata ios16-root.simg
 ```
 
-`-S 256M` 是**必须**的：不分块时 fastboot 会一次性把整个文件读进内存，
-12 GB 会直接失败。
+为什么是 `.simg` 而不是 raw：
 
-### 5.2 方式 B：TWRP 里 dd（fastboot 不行时用）
+| | `.simg`（推荐） | raw `.img` |
+|---|---|---|
+| 文件大小 | 11.1 GiB | 16.0 GiB |
+| USB 传输量 | 只有 RAW chunk，约 11.15 GiB | 全部 16 GiB |
+| 空块 | FILL / DONT_CARE，设备端直接填零 | 传 16 GiB 的零 |
+| mido 验证过 | **是** | 否 |
 
-把镜像放 U 盘，插 OTG，然后 TWRP 终端：
+> **「11 GiB 变 16 GiB 是不是脚本坏了？」不是。**
+> Android sparse 是**压缩描述**格式：FILL 块（一段全零或全同一字节）和
+> DONT_CARE 块只占几字节头，展开后才成为完整的 16 GiB。
+> `simg2img.py` 的输出尺寸**必须**等于 sparse 头里的 `total_blks * blk`，
+> 那个脚本会校验这一条。11 → 16 GiB 是**正确展开**，不是撑坏。
+
+`-S 512M` 是分块大小。不分块时 fastboot 会试图把整个文件读进内存。
+
+### 5.2 刷之前：确认分区够大
 
 ```bash
-ls /usb_otg/                      # 确认真实挂载点
-dd if=/usb_otg/ios16-root.img of=/dev/block/bootdevice/by-name/userdata bs=4M
-sync
+fastboot getvar partition-size:userdata
 ```
 
-`dd` 会跑很久（10-30 分钟）。**中途绝对不能拔线或断电。**
+要 ≥ `0x1AC4BFB000`（约 107 GB 的字节数）。实际 userdata 有 52.99 GiB 可用。
 
-### 5.3 确认写对了
+### 5.3 刷完立刻验证（**不要先后启动**）
 
 ```bash
-# TWRP 终端
-dd if=/dev/block/bootdevice/by-name/userdata bs=512 count=2 2>/dev/null | hexdump -C | head
+adb push ugg/tools/verify-flash.sh /tmp/
+adb shell sh /tmp/verify-flash.sh
 ```
 
-看最后两字节是不是 `55 aa`（MBR/GPT 保护标记）或者能看到 `HFS`/`APFS` 字样。
+它会从**卡上**读回四个关键的 HFS 目录节点，并打印期望值。四个全对上才算写成功。
+
+**为什么要这一步**：2026-11-22 之前的几轮，都是先启动、再从内核日志里
+发现数据不对，白白浪费启动和排查。直接读卡 30 秒出结果。
+
+如果对不上，可以再带一个块号参数去验证"4 GiB 回绕"假设：
+
+```bash
+adb shell sh /tmp/verify-flash.sh 686351
+```
+
+### 5.4 大刷之后 fastboot 会挂住（正常现象）
+
+小米 ABL 在刷完大分区后，下一次 `fastboot boot` 会卡在 `Sending` 不动。
+**这不是故障**：手动按住 **电源 + 音量下** 重新进 fastboot 即可。
+不要对挂住的 ABL 重试命令，也**不要拔线**（曾有一次 25/25 时中断，只能整盘重刷）。
 
 ---
 
 ## 6. 启动进 iOS
 
 ```bash
-fastboot boot shim-boot-0082-mido.img
+fastboot boot shim-boot-01NN-xxx.img
 ```
 
-**这一次和主动试跑的区别**：现在 `userdata` 里有真的 iOS 根卷了，
-XNU 的 `bsd_init` 应该能找到 `IOMedia/Apple_HFS` 根设备，不再无限等待。
+**这一次和"只试跑内核"的区别**：现在 `userdata` 里有真的 iOS 根卷，
+XNU 的 `bsd_init` 能找到根设备并挂载。
 
-### 6.1 预期顺序
+### 6.1 判读
+
+```
+hfs: mounted iOSRoot on device b(1, 0)      根卷挂上了
+bsd_init: done                              内核初始化完成
+load_init_program: attempting to load /sbin/launchd
+```
+
+**只要出现 `hfs_swap_BTNode: invalid forward link`，就是卡上数据仍然不对**，
+不要去调内核 —— 回到 5.3 验证卡上字节。
+
+### 6.2 完整预期顺序
 
 ```
 shim 红底控制台（滚动，比试跑时短）
 XNU jumping
 黑屏 1-3 秒
-内核文字开始滚动（现在是 24bpp，能画出来了）
+内核文字开始滚动
 bsd_init: ...
-IOMedia/Apple_HFS 挂载成功
-launchd 启动
+hfs: mounted iOSRoot on device b(1, 0)
+load_init_program: attempting to load /sbin/launchd
 苹果 logo / 白屏
 桌面
 ```
 
-### 6.2 如果卡在 `Waiting on <dict ... IOMedia ... Apple_HFS>`
+### 6.3 排错
 
-这是"找不到根设备"。检查：
-
-1. 第 5.3 步的确认做了吗？头两字节对吗？
-2. `userdata` 是不是被格式化成了 ext4 而**没有写入镜像**？（顺序错了）
-3. shim 控制台里 `GPT userdat F=... N=...` 的数字，是不是和你刷的分区一致？
+| 现象 | 含义 | 怎么办 |
+|---|---|---|
+| `hfs_swap_BTNode: invalid forward link` | **卡上数据不对**，不是内核问题 | 回到 5.3 读卡验证，然后重刷 |
+| `cannot mount root` 反复重试 | 根设备找到了但卷读不出来 | 5.3 验证卷头 `48 58`（HFSX） |
+| `Waiting on <dict ... IOMedia ... Apple_HFS>` | 根本没找到根设备 | 检查 `rd=ufsroot0` 与分区大小 |
+| `failed loading /sbin/launchd: errno 5` | 目录树节点坏了 | 同上，回到 5.3 |
 
 ---
 

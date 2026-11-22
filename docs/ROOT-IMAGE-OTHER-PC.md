@@ -232,10 +232,10 @@ fastboot getvar partition-size:userdata
    输出的字节数必须 **≥ 11,970,598,900**（userdata 是 54 GB，肯定够）。
 
 ```
-fastboot -S 256M flash userdata 路径/ios16-root.simg
+fastboot -S 512M flash userdata 路径/ios16-root.simg
 ```
 
-   `-S 256M` 是**分块传输**，避免一次传 12 GB 被 USB 缓冲打断。
+   `-S 512M` 是**分块传输**（mido 用的就是这个值，24–25 片）。
    全程 **10–15 分钟**，不要拔线。
 
 4. 刷完开机：
@@ -344,7 +344,7 @@ ls -l parts/*.part*
 
 ```
 # 拔线，重进 fastboot（音量下 + 电源），然后重刷
-fastboot -S 256M flash userdata 路径/ios16-root.simg
+fastboot -S 512M flash userdata 路径/ios16-root.simg
 ```
 
 刷 userdata 是**幂等**的，重刷不会更糟。
