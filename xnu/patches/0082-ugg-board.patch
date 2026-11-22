@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..634d1ca 100644
+index 6b926fe..c133196 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -882,7 +882,7 @@ index 6b926fe..634d1ca 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1383,43 @@ sweet_ufs_init(void)
+@@ -651,15 +1383,44 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -920,16 +920,17 @@ index 6b926fe..634d1ca 100644
  	sweet_touch_init();
  	sweet_usb_probe();
 +#else
-+	{
-+		extern void ugg_input_init(void);
-+		ugg_input_init();
-+	}
++	/*
++	 * ugg's digitiser is started from sweet_ufs_log_after_mount(), not here:
++	 * this runs before vfs_mountroot, and a wedged SPMI/I2C bus at that point
++	 * hangs the boot with no root and no log. See ugg_input_init().
++	 */
 +	/* GPU bring-up skipped for ugg: CPU rendering only (docs/MIDO-PORT-PLAN.md) */
 +#endif
  	return 0;
  }
  
-@@ -669,7 +1429,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1430,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -938,7 +939,7 @@ index 6b926fe..634d1ca 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1438,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1439,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -947,7 +948,7 @@ index 6b926fe..634d1ca 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1496,118 @@ struct sweet_log_header {
+@@ -736,66 +1497,118 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -1100,7 +1101,7 @@ index 6b926fe..634d1ca 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1617,102 @@ sweet_log_start(void)
+@@ -805,6 +1618,114 @@ sweet_log_start(void)
  	}
  }
  
@@ -1198,6 +1199,18 @@ index 6b926fe..634d1ca 100644
 +		return;
 +	}
 +	sweet_log_start();
++#if defined(UGG_BOARD)
++	/*
++	 * The digitiser starts here, not at driver init: by now the root is mounted
++	 * and the console ring is being flushed to the partition, so a misbehaving
++	 * touch controller can no longer look like "the boot died before the mount"
++	 * (which is exactly how three earlier rounds were misread).
++	 */
++	{
++		extern void ugg_input_init(void);
++		ugg_input_init();
++	}
++#endif
 +}
 +
  /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
@@ -1205,10 +1218,10 @@ index 6b926fe..634d1ca 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..5546aa9
+index 0000000..b477c18
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,509 @@
+@@ -0,0 +1,528 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
@@ -1553,6 +1566,7 @@ index 0000000..5546aa9
 +input_thread(void *arg __unused, wait_result_t wr_ __unused)
 +{
 +	int key_state[3] = {0, 0, 0};
++	uint8_t pon_state = 0;
 +	bool fdown[GT_POINTS] = {false};
 +	int fx[GT_POINTS] = {0}, fy[GT_POINTS] = {0};
 +	unsigned logged = 0, errors = 0, reads = 0;
@@ -1560,14 +1574,27 @@ index 0000000..5546aa9
 +	gt_read_resolution();
 +	printf("UGG INPUT: GT9xx max %dx%d, swap %d\n", gt_max_x, gt_max_y, gt_swap_xy);
 +
++	unsigned ticks = 0;
 +	for (;;) {
-+		/* keys */
++		/*
++		 * PON reads are an SPMI transaction, which is orders of magnitude
++		 * slower than the GPIO reads next to it, and every poll of this thread
++		 * is a touch-latency budget. Sample the keys once every 8th tick
++		 * (~64-120 ms) -- far below what a human can notice for a key press --
++		 * and keep the touch path at full rate.
++		 */
 +		uint8_t pon = 0;
-+		bool pok = pon_rt(&pon);
++		bool pok = false;
++		if ((ticks++ & 7) == 0) {
++			pok = pon_rt(&pon);
++			if (pok) {
++				pon_state = pon;
++			}
++		}
 +		int now[3] = {
-+			pok ? !!(pon & 1u) : key_state[0],
++			pok ? !!(pon_state & 1u) : key_state[0],
 +			!(rd(gpio85, 4) & 1u),
-+			pok ? !!(pon & 2u) : key_state[2],
++			pok ? !!(pon_state & 2u) : key_state[2],
 +		};
 +		for (int k = 0; k < 3; k++) {
 +			if (now[k] != key_state[k]) {
@@ -1653,14 +1680,19 @@ index 0000000..5546aa9
 +ugg_input_init(void)
 +{
 +	/*
-+	 * OFF unless ugginput=1. This runs at the tail of sweet_ufs_init(), and
-+	 * its first act used to be 512 unbounded SPMI MMIO reads: with no bus
-+	 * response that hangs the core and the APSS watchdog reboots the phone,
-+	 * which looks exactly like dying before the root mount. Three rounds were
-+	 * spent inside vfs_mountroot because of it. The digitiser can wait until
-+	 * the desktop is up.
++	 * ON by default, but only ever called AFTER the root volume is mounted
++	 * (sweet_ufs_log_after_mount). It used to run at the tail of
++	 * sweet_ufs_init(), i.e. before vfs_mountroot, and its first act was 512
++	 * unbounded SPMI MMIO reads: with no bus response that hangs the core and
++	 * the APSS watchdog reboots the phone, which looked exactly like dying
++	 * before the mount. Three rounds were spent inside vfs_mountroot because of
++	 * it.
++	 *
++	 * Starting it after the mount keeps that failure mode out of the boot path:
++	 * however the digitiser misbehaves now, the root is already up and the log
++	 * is already being flushed. ugginput=0 still disables it.
 +	 */
-+	int enabled = 0;
++	int enabled = 1;
 +	thread_t thread;
 +
 +	if (input_started) {
@@ -2653,17 +2685,57 @@ index fbcdfac..41be9ea 100644
  	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
  	void free() APPLE_KEXT_OVERRIDE;
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
-index 27bc49d..43497aa 100644
+index 27bc49d..8597a49 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -434,14 +434,25 @@ SweetHIDTouch::start(IOService *provider)
+@@ -356,6 +356,30 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
+  * app-switcher gesture.
+  */
+ #define SWEET_TOUCH_EDGE_PX 48
++/*
++ * The coordinate space the hardware driver delivers, in pixels. This is NOT the
++ * digitizer's own reported resolution: ugg_input.c reads the GT9xx config block
++ * (1200x1920 here) and scales every point into panel pixels before calling
++ * sweet_hid_touch(), so what arrives here is always 720x1280 on ugg.
++ *
++ * Getting this wrong is not a rounding error: normalizing 720-wide values by
++ * 1080 squeezes the whole panel into 2/3 of the display, so the bottom and right
++ * thirds of the screen never respond to touch.
++ */
++#if defined(UGG_BOARD)
++#define SWEET_TOUCH_SPACE_W 720
++#define SWEET_TOUCH_SPACE_H 1280
++/*
++ * The canvas backboardd renders at, and therefore the space the normalized
++ * coordinates must cover. Stated here because the framebuffer's own default is
++ * 750x1334 for ugg and the two must not drift apart.
++ */
++#define SWEET_FB_TOUCH_CANVAS_W 750
++#define SWEET_FB_TOUCH_CANVAS_H 1334
++#else
++#define SWEET_TOUCH_SPACE_W 1080
++#define SWEET_TOUCH_SPACE_H 2400
++#endif
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
+@@ -434,14 +458,34 @@ SweetHIDTouch::start(IOService *provider)
  	}
  	int native = 0;
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
 +#if defined(UGG_BOARD)
++	/*
++	 * The presented canvas is 750x1334 (SweetFramebuffer.cpp), and the driver
++	 * hands us pixels in the 720x1280 panel space. Map panel -> canvas, which is
++	 * what backboardd expects: it maps the digitizer 1:1 onto the canvas.
++	 *
++	 * This used to say 1080x1920 with no offset, i.e. it described a display two
++	 * thirds larger than the one attached, so every touch landed in the top-left
++	 * corner and the outer third of the panel did nothing.
++	 */
 +	(void)native;
-+	fLogicalW = 1080;                   /* panel = whole downsampled canvas */
-+	fLogicalH = 1920;
++	fLogicalW = SWEET_FB_TOUCH_CANVAS_W;
++	fLogicalH = SWEET_FB_TOUCH_CANVAS_H;
 +	fOffX = fOffY = 0;
 +#else
  	fLogicalW = native ? 1080 : 1125;
@@ -2682,18 +2754,55 @@ index 27bc49d..43497aa 100644
  	gSweetTouch = this;
  	registerService();
  	IOLog("SWEET HID: touch registered\n");
-@@ -459,7 +470,11 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -458,22 +502,41 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
  		return;
  	}
- 	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
-+#if defined(UGG_BOARD)
-+	y = y < 0 ? 0 : (y > 1919 ? 1919 : y);
-+#else
- 	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
-+#endif
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x > SWEET_TOUCH_SPACE_W - 1 ? SWEET_TOUCH_SPACE_W - 1 : x);
++	y = y < 0 ? 0 : (y > SWEET_TOUCH_SPACE_H - 1 ? SWEET_TOUCH_SPACE_H - 1 : y);
  
  	IOLockLock(fLock);
  	bool was = fDown[finger];
+-	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	/*
++	 * Panel pixels -> presented canvas, normalized to 0..1 (16.16 fixed point).
++	 * Clamp after adding the letterbox offset: on sweet the canvas is larger
++	 * than the panel, so the offset can push a corner pixel past the edge and
++	 * an unclamped value >1.0 is rejected by backboardd as off-screen.
++	 */
++	int64_t cx = (int64_t)x + fOffX;
++	int64_t cy = (int64_t)y + fOffY;
++	if (cx < 0) {
++		cx = 0;
++	} else if (cx > fLogicalW - 1) {
++		cx = fLogicalW - 1;
++	}
++	if (cy < 0) {
++		cy = 0;
++	} else if (cy > fLogicalH - 1) {
++		cy = fLogicalH - 1;
++	}
++	IOFixed nx = (IOFixed)((cx << 16) / fLogicalW);
++	IOFixed ny = (IOFixed)((cy << 16) / fLogicalH);
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX ||
++		    x > SWEET_TOUCH_SPACE_W - 1 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX ||
++		    y > SWEET_TOUCH_SPACE_H - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 index 92f3e26..540d0f1 100644
 --- a/iokit/KernelConfigTables.cpp

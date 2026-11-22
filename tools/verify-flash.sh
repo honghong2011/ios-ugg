@@ -1,60 +1,84 @@
 #!/bin/sh
-# verify-flash.sh -- read back four catalog nodes from the raw block device.
+# verify-flash.sh -- read catalog nodes straight off the card and compare with
+# what the image holds. Run it in TWRP right after a flash, before booting.
 #
-# Why: the kernel reads 0x6a13d46a where the image has 0x00004af9 at the SAME
-# block. check-hfs-root.py certifies the image, and the extent map the kernel
-# prints matches the image exactly, so the divergence is in the bytes on the
-# card. Reading them back directly decides whether the data ever arrived.
+#   adb push verify-flash.sh /tmp/ && adb shell sh /tmp/verify-flash.sh
 #
-# Run it in TWRP after flashing, before booting:
+# WHY THE OFFSETS ARE PARTITION-RELATIVE
+# --------------------------------------
+# /dev/block/by-name/userdata IS the partition, so block N of the image lives at
+# byte N*4096 *inside that device*. An earlier version of this script used the
+# absolute disk byte (first_block + N, i.e. +1376256 blocks) -- that is right for
+# /dev/block/mmcblk0 and wrong for every by-name path, which is what the lookup
+# below finds first. It read 5.25 GiB past the node and reported garbage.
 #
-#   adb push verify-flash.sh /tmp/
-#   adb shell sh /tmp/verify-flash.sh
+# The four nodes are the ones HFS rejects first when the card is wrong:
+#   node 19174 -> image block 1734927
+#   node 19193 -> image block 1734965
+#   node 19462 -> image block 1735503
+#   node 19514 -> image block 1735607
 #
-# Expected first 14 bytes of each node (image side):
-#   19174  00 00 4a f9 00 00 00 05 ff 00 00 17 00 00
-#   19193  00 00 01 fa 00 00 4a e6 ff 00 00 17 00 00
-#   19462  00 00 00 00 00 00 4b 9a 00 00 00 b7 00 00
-#   19514  00 00 00 02 00 00 4c 37 ff 00 00 1c 00 00
+# It also prints the volume header (partition block 0, +1024) and, with a second
+# argument, ANY image block you name -- that is how you chase a suspected shift:
 #
-# Anything else means the card does not hold what the image holds.
+#   adb shell sh /tmp/verify-flash.sh 686351
 
 set -u
 
-# find the userdata block device
 DEV=""
-for d in /dev/block/sda38 /dev/block/mmcblk0p38 /dev/block/by-name/userdata \
-         /dev/block/bootdevice/by-name/userdata; do
-    if [ -e "$d" ]; then DEV="$d"; break; fi
+for base in /dev/block/by-name /dev/block/platform/*/by-name \
+            /dev/block/bootdevice/by-name /dev/block/platform/*/*/by-name; do
+    [ -e "$base/userdata" ] && { DEV="$base/userdata"; break; }
 done
 if [ -z "$DEV" ]; then
-    for d in /dev/block/sda* /dev/block/mmcblk0p*; do
-        [ -e "$d" ] || continue
-        if [ "$(cat /sys/class/block/$(basename $d)/size 2>/dev/null)" = "111132639" ]; then
-            DEV="$d"; break
+    for d in /dev/block/mmcblk0p*; do
+        [ -b "$d" ] || continue
+        if [ "$(cat /sys/class/block/$(basename "$d")/size 2>/dev/null)" = "111132639" ]; then
+            DEV="$d"
+            break
         fi
     done
 fi
-[ -n "$DEV" ] || { echo "cannot find the userdata device"; exit 1; }
-echo "device: $DEV"
-echo "size  : $(cat /sys/class/block/$(basename $DEV)/size 2>/dev/null) sectors"
+[ -n "$DEV" ] || { echo "CANNOT FIND USERDATA"; exit 1; }
+
+echo "userdata : $DEV"
+echo "resolved : $(readlink -f "$DEV" 2>/dev/null)"
+echo "size     : $(cat /sys/class/block/$(basename "$(readlink -f "$DEV" 2>/dev/null || echo "$DEV")")/size 2>/dev/null) sectors"
 echo
 
-dump() {          # dump NODE ABS_BYTE EXPECTED
-    echo "--- node $1 at byte $2"
-    echo "    expect: $3"
-    printf "    card  : "
-    # dd prints to stdout; od reads it. 14 bytes is one od line.
-    dd if="$DEV" bs=1 skip="$2" count=14 2>/dev/null | od -An -tx1 | tr -d '\n' | sed 's/^ *//'
+# dump IMAGE_BLOCK EXPECTED_HEX [LABEL] -- offsets are INSIDE the partition.
+dump() {
+    echo "--- image block $1$3"
+    echo "    image expects: $2"
+    printf "    card  holds  : "
+    dd if="$DEV" bs=4096 skip="$1" count=1 2>/dev/null \
+        | dd bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d '\n' | sed 's/^ *//'
     echo
 }
 
-dump 19174 12743405568 "00 00 4a f9 00 00 00 05 ff 00 00 17 00 00"
-dump 19193 12743561216 "00 00 01 fa 00 00 4a e6 ff 00 00 17 00 00"
-dump 19462 12745764864 "00 00 00 00 00 00 4b 9a 00 00 00 b7 00 00"
-dump 19514 12746190848 "00 00 00 02 00 00 4c 37 ff 00 00 1c 00 00"
+dump 1734927 "00 00 4a f9 00 00 00 05 ff 01 00 17 00 00 00 06" "  (node 19174, leaf)"
+dump 1734965 "00 00 01 fa 00 00 4a e6 ff 00 00 17 00 00 00 00" "  (node 19193, leaf)"
+dump 1735503 "00 00 00 00 00 00 4b 9a 00 00 00 b7 00 00 00 00" "  (node 19462, index)"
+dump 1735607 "00 00 00 02 00 00 4c 37 ff 00 00 1c 00 00 00 00" "  (node 19514, leaf)"
 
 echo
-echo "Also dump the same offsets from the image on your PC with"
-echo "  python check-hfs-root.py --node 19174 19193 19462 19514 .simg"
-echo "The two must match byte for byte."
+echo "=== volume header: partition block 0, 1024 bytes in ==="
+printf "    expect 48 58 00 05 (HFSX): "
+dd if="$DEV" bs=4096 skip=0 count=1 2>/dev/null \
+    | dd bs=1 skip=1024 count=16 2>/dev/null | od -An -tx1 | tr -d '\n' | sed 's/^ *//'
+echo
+
+# Any extra block number(s) on the command line: dump them too. Use this to test
+# the 4 GiB-shift theory -- if the card at 1734927 holds the image's block 686351
+# (1734927 - 1048576), the writer wrapped its byte offset at 2^32.
+for extra in "$@"; do
+    dump "$extra" "(whatever the image has there)" "  (requested)"
+done
+
+echo
+cat <<'EOF'
+Compare against the image on the PC:
+    python check-hfs-root.py --node 19174 19193 19462 19514 ios16-root.simg
+Both sides must match byte for byte. If the card is wrong, say so and stop --
+booting on top of a bad card only produces a misleading kernel log.
+EOF

@@ -22,8 +22,8 @@ WORK=${1:-$HOME/ugg-flash}
 RUN=${RUN:-43634756880}          # build-root run that produced the 7 parts
 EXPECTED=11970598900                # exact size of ios16-root.simg
 
-say() { printf '\n=== $s\n' "$*"; }
-die() { printf '\n!!! $s\n' "$*" >&2; exit 1; }
+say() { printf '\n=== %s\n' "$*"; }
+die() { printf '\n!!! %s\n' "$*" >&2; exit 1; }
 
 say 'pre-flight'
 command -v gh >/dev/null || die 'gh (GitHub CLI) is required: https://cli.github.com'
