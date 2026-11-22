@@ -47,7 +47,7 @@
 
 | 文件 | 从哪来 | 大小 |
 |---|---|---|
-| `shim-boot-0082-mido.img` | 仓库根目录，最新构建 | 8.2 MB |
+| `shim-boot-0105-touch.img` | 工作区根目录，最新构建（含触摸修复） | 8.2 MB |
 | `ios16-root.img` | GitHub Actions artifact `ios16-root-parts`，需自己拼 | ~12 GB |
 
 **根镜像怎么拿到并拼起来**
@@ -102,7 +102,7 @@ fastboot getvar partition-size:userdata
 **这一步一定要先做。** 它不改磁盘，只是把镜像放进内存跑一次。
 
 ```bash
-fastboot boot shim-boot-0082-mido.img
+fastboot boot shim-boot-0105-touch.img
 ```
 
 ### 3.1 屏幕上应该看到什么
@@ -448,7 +448,7 @@ dd if=/dev/block/bootdevice/by-name/cache of=/external_sd/shimlog.bin bs=4096 co
 adb shell "cat /proc/partitions" > partitions.txt
 
 # 2. 试跑（不破坏）
-fastboot boot shim-boot-0082-mido.img
+fastboot boot shim-boot-0105-touch.img
 
 # 3. 备份 boot/modem
 adb reboot recovery
@@ -466,7 +466,7 @@ adb reboot bootloader
 fastboot -S 256M flash userdata ios16-root.img
 
 # 7. 启动
-fastboot boot shim-boot-0082-mido.img
+fastboot boot shim-boot-0105-touch.img
 ```
 
 ---
