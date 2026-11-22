@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..1b46184 100644
+index 6b926fe..0d3856d 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -559,7 +559,7 @@ index 6b926fe..1b46184 100644
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -583,6 +1031,280 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+@@ -583,6 +1031,314 @@ static const struct cdevsw sweet_ufs_cdevsw = {
  	.d_type       = D_DISK,
  };
  
@@ -777,6 +777,14 @@ index 6b926fe..1b46184 100644
 +	 */
 +	uint32_t node = 0;
 +	int bad = 0, checked = 0;
++	/*
++	 * Where does the damage start? The extent boundaries only bracket it: ext1
++	 * ends at node 12287 and ext2 begins at node 12288, but those two extents are
++	 * 3.5 GiB apart and hold no nodes, so the real boundary lies between the last
++	 * good node and the first bad one and cannot be derived from the extent map.
++	 * Reporting that pair turns "somewhere in 0.84-4.34 GiB" into one node.
++	 */
++	uint32_t first_bad = 0;
 +	for (int i = 0; i < 8 && ext[i][1]; i++) {
 +		uint64_t bytes = (uint64_t)ext[i][1] * blockSize;
 +		uint64_t per = nodeSize;
@@ -816,6 +824,9 @@ index 6b926fe..1b46184 100644
 +				}
 +				if (fLink >= totalNodes || bLink >= totalNodes ||
 +				    (kind != 0 && kind != 1 && kind != 2 && kind != 0xff)) {
++					if (!first_bad) {
++						first_bad = idx;
++					}
 +					bad++;
 +					if (!known && bad <= 20) {
 +						printf("UGG CHECK: BAD node=%u fLink=0x%08x bLink=0x%08x kind=0x%02x\n",
@@ -834,13 +845,36 @@ index 6b926fe..1b46184 100644
 +		}
 +		node += in_ext;
 +	}
-+	printf("UGG CHECK: walked %d nodes, %d with a bad descriptor\n", checked, bad);
++	/*
++	 * Be precise about what "valid" means here, because the obvious reading of a
++	 * line like this is wrong.
++	 *
++	 * The test accepts fLink < totalNodes, bLink < totalNodes and kind in
++	 * {0,1,2,0xff}. An all-zero node satisfies all three, so every NEVER-USED node
++	 * counts as good. In the 0104 run ext2+ext3 held 16384 nodes and 6552 were
++	 * reported bad; the other 9832 are mostly unused, not healthy. So 'bad' is a
++	 * floor on the damage, and (checked - bad) must never be read as 'fine'.
++	 */
++	printf("UGG CHECK: walked %d nodes, %d with a bad descriptor"
++	    " (unused all-zero nodes also pass, so %d is a floor)\n",
++	    checked, bad, bad);
++	/*
++	 * The single most useful line for locating the fault: the last good node and
++	 * the first bad one bracket the damage to one node, which is 8192 bytes, so
++	 * the failure region is pinned to a block instead of a 3.5 GiB span.
++	 */
++	if (bad) {
++		printf("UGG CHECK: first bad node=%u, last good node below it=%u\n",
++		    first_bad, first_bad ? first_bad - 1 : 0);
++	} else {
++		printf("UGG CHECK: no bad nodes\n");
++	}
 +}
 +
  static int
  sweet_ufs_init(void)
  {
-@@ -592,9 +1314,16 @@ sweet_ufs_init(void)
+@@ -592,9 +1348,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -857,7 +891,7 @@ index 6b926fe..1b46184 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -606,8 +1335,18 @@ sweet_ufs_init(void)
+@@ -606,8 +1369,18 @@ sweet_ufs_init(void)
  	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
@@ -876,7 +910,7 @@ index 6b926fe..1b46184 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1362,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1396,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -891,7 +925,7 @@ index 6b926fe..1b46184 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1392,44 @@ sweet_ufs_init(void)
+@@ -651,15 +1426,44 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -939,7 +973,7 @@ index 6b926fe..1b46184 100644
  	return 0;
  }
  
-@@ -669,7 +1439,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1473,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -948,7 +982,7 @@ index 6b926fe..1b46184 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1448,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1482,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -957,7 +991,7 @@ index 6b926fe..1b46184 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1506,126 @@ struct sweet_log_header {
+@@ -736,66 +1540,126 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -977,9 +1011,7 @@ index 6b926fe..1b46184 100644
 + */
 +static uint64_t
 +sweet_log_base(void)
- {
--	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
--	uint64_t flushed = 0, seq = 0;
++{
 +	return su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +}
 +
@@ -1002,7 +1034,9 @@ index 6b926fe..1b46184 100644
 + */
 +static int
 +sweet_log_write_locked(void)
-+{
+ {
+-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
 +	uint64_t base = sweet_log_base();
  	void *bounce = (void *)(su.dma + DMA_BOUNCE);
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
@@ -1118,7 +1152,7 @@ index 6b926fe..1b46184 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1635,114 @@ sweet_log_start(void)
+@@ -805,6 +1669,114 @@ sweet_log_start(void)
  	}
  }
  
