@@ -145,26 +145,42 @@ if (sparse_block) {
 **所以：如果 CI 用的是普通 `img2simg`，零块是 FILL(0)，fastboot 会把零一起写。**
 假设 A 就不成立 —— 除非这份 .simg 里真的有 DONT_CARE。
 
-#### 这个前提可以离线验证，不用碰手机
+#### 假设 A 已判死刑（不需要实测了）
+
+三处独立证据，全部指向同一个结论：
+
+1. **CI 用的是普通调用**（`.github/workflows/build-root.yml:165`）：
+
+   ```yaml
+   img2simg work/ios16-root.img work/ios16-root.simg      # 没有 -s
+   ```
+
+2. **AOSP 源码**：全同块（含全零）→ `sparse_file_add_fill()`，
+   DONT_CARE 只走 `SPARSE_READ_MODE_HOLE`（`img2simg -s`）。
+3. **mido 自己的备注**（`ios-mido/NOTES.md:139`）：
+   > "img2simg: **zero blocks become FILL chunks**, so a full flash overwrites
+   > every block the rw boots changed"
+
+**所以这份 .simg 里的零块是 FILL(0)，fastboot 会把零一起写到卡上。
+"零块没被写、旧安卓数据残留"这条不成立。**
+
+> 第 43 轮和第 44 轮初版都把这一段当成"最可能的解释"写进了交接文档。
+> 这是本项目第 N 次"假设很顺，但没验证" —— 教训不是"别假设"，
+> 而是**能在几分钟内离线验证的前提，必须先验证再写进文档**。
+
+剩下的候选只有 B/D（偏移失步）。这个**必须靠实测**：
 
 ```bash
-python ugg/tools/simg-info.py ios16-root.simg --list-dont-care
+python ugg/tools/verify-card.py ios16-root.simg --map
 ```
 
-| 输出 | 结论 |
-|---|---|
-| `No DONT_CARE chunks` | **A 死刑** —— 零块是 FILL(0)，问题在别处 |
-| `DONT_CARE covers N GiB` | A 成立 —— 先 erase 再刷，并考虑 CI 改用不带 `-s` 的 img2simg |
+顺带保留 `simg-info.py`：它可以随时回答"这份镜像到底装了什么"，
+是以后每次怀疑镜像时的第一道检查（也是唯一能在不碰手机的情况下做的）。
 
-> 这条正是本项目反复吃亏的地方：先假设、后验证，而每个假设都能自圆其说。
-> 这次至少在把步骤交给你之前去读了实现。
+#### 现在只剩 B/D：偏移失步
 
-#### 但 B/D 不能被 A 解释的部分
-
-如果全是 A，坏区里应当有**大段全零**。但日志里坏节点是**混杂**的
-（有 `.PRO`、有 `88c2b5b2` 乱码）。这更像"某些块没写、某些块写了别的"。
-
-**所以要实测，不要猜。** 别再靠四个节点推断了 —— 直接整段比对。
+而且坏区内容是**混杂**的（`.PRO` 文本 + `88c2b5b2` 乱码交替），
+这正像"从某一处起整体错位"——即失步。失步点必须实测，不能从四个节点推断。
 
 #### 决定性工具：`tools/verify-card.py`（本轮新增，只读）
 
@@ -183,20 +199,20 @@ python tools/verify-card.py ios16-root.simg --map
 
 | 输出 | 结论 | 修法 |
 |---|---|---|
-| 坏区里是**大段 00，且 `simg-info` 报有 DONT_CARE** | A 成立：那些范围没被写 | **先 erase 再刷** |
-| 坏区里是大段 00，但 `simg-info` 报 **No DONT_CARE** | 那里本该是数据却被写成零 → 传输截断 | 查 USB / 重刷 / 换 fastboot |
-| 坏区从某个**固定偏移**开始且内容错位 | 偏移回绕 | 换 fastboot / 换刷写通道 |
+| 坏区从某个**固定偏移**开始、之后整体错位 | 偏移失步（写入方） | 换 platform-tools / 换刷写通道 |
+| 坏区里是**大段 00** | 本该是数据却被写成零 → 传输截断 | 查 USB / 重刷 / 换 fastboot |
 | 坏区是**内核镜像的连续片段** | 写入源在总线层混入了别的数据 | 查 USB/内存，不是 fs 问题 |
+| 坏区与镜像**完全一致** | 卡上其实是对的 | 那么问题在 HFS/内核侧，回来找我 |
 
-#### 若 A 成立：修法一步 —— **先擦再刷**
+#### 不管结论如何，先擦一次
 
 ```bash
 fastboot erase userdata                    # 或 TWRP 里格式化 data
 fastboot -S 512M flash userdata ios16-root.simg
 ```
 
-擦成确定的零以后，DONT_CARE 跳过也无所谓了 —— 这也是 mido 每次都从
-"Format Data" / 擦过的卷开始的原因。**标准做法，比任何脚本都简单。**
+`erase` 幂等、只要 1–2 分钟，却能把"卡上残留旧数据"这个变量消掉，
+让下一次实测的结果不用打问号。mido 每次也从 Format Data 开始。
 
 > 顺带：`erase` 这一步**不管 A 成不成立都值得做**。它是幂等的，
 > 代价 1–2 分钟，却能把"旧数据残留"这个变量彻底消掉 —— 而在没消掉之前，
