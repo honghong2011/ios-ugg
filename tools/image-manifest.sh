@@ -35,7 +35,10 @@ bad=0
     echo "# launchd is execd as PID 1; dyld is needed for any Mach-O to run."
     echo "# mido records the requirement for both as root:wheel 0755."
 
-    for f in sbin/launchd usr/lib/dyld bin/sh \
+    # /bin itself is checked alongside /bin/sh: "MISSING bin/sh" is ambiguous
+    # between "the directory was never populated" and "the directory exists but
+    # this entry does not", and those are different problems.
+    for f in sbin/launchd usr/lib/dyld bin bin/sh bin/bash bin/dash \
              System/Library/xpc/launchd.plist \
              System/Library/Caches/com.apple.dyld \
              private/var private/etc private/preboot; do

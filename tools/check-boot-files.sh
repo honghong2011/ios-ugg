@@ -35,7 +35,10 @@ ROOT=${1:?usage: check-boot-files.sh IMAGE_MOUNTPOINT}
 
 missing=0
 echo "boot-critical files under $ROOT:"
-for f in sbin/launchd usr/lib/dyld bin/sh \
+# /bin is listed next to /bin/sh so the report can say whether the directory was
+# never populated or just lacks this entry -- those are different faults, and
+# "MISSING bin/sh" alone cannot tell them apart.
+for f in sbin/launchd usr/lib/dyld bin bin/sh bin/bash \
          System/Library/xpc/launchd.plist \
          private/var private/etc private/var/db; do
     # Check for a SYMLINK first. iOS makes /bin/sh a link to /bin/bash, and the
