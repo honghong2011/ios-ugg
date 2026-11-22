@@ -104,21 +104,77 @@ SWEET LOG: flushed 7943 bytes to block 0xe8f3fa
 | HFS 自己写坏 | 只读挂载（`rootrw=0`）坏值一比特不变 | **排除** |
 | **写入的数据不对** | 镜像对、卡上错、且有明确边界 | **唯一剩余** |
 
-### 6. 新假设：写 >4 GiB 时偏移回绕
+### 6. 两个假设，都指向"写入方"，但必须实测区分
 
-边界在 0.84–4.34 GiB 之间，而 **4 GiB = 2^32 字节**正好落在窗口里。
-若写入方用 **32 位字节偏移**，越过 4 GiB 即回绕，回绕后的数据落到卷前部 ——
-与「ext2/ext3 坏、ext0/ext1 好」完全一致，
-也解释了坏区里为什么是**别人的数据**（回绕写覆盖了前面）。
+坏区边界在 **0.84–4.34 GiB（卷内偏移）** 之间。我把所有已知机制的阈值
+都对了一遍，**只有下面两个能落进这个窗口**：
 
-**不需要重刷就能证伪/证实，一条命令：**
+| 假设 | 阈值 | 绝对位置 | 与观察是否相符 |
+|---|---|---|---|
+| **A. DONT_CARE 被跳过，旧数据残留** | 无固定阈值 | 任意 | ✅ 相符（零块分布无关） |
+| **B. 32 位偏移按卷内偏移算** | 卷内 4 GiB | 9.93 GB | ✅ 落在 6.50–10.30 GB 窗口内 |
+| C. 绝对 32 位字节回绕 | 4.29 GB | 4.29 GB | ❌ ext0 在 6.39 GB，**高于**它却正常 |
+| D. 绝对 2^33 | 8.59 GB | 8.59 GB | ❌ ext1 在 6.50 GB 正常，但 8.59 也 < ext2，**无法与 A 区分** |
 
+所以 **C 已被数据排除**（这点很关键，能省掉一次瞎猜），
+A / B / D 还需要实测才能分辨。
+
+#### 为什么 A 很有说服力
+
+`img2simg` 把零块写成 **DONT_CARE**（"这块不用管"）。
+fastboot 收到 DONT_CARE 的语义是**跳过、什么都不写**（rsync 的参考实现注释写得很直白：
+"DONT_CARE (skipped entirely — never transferred or written)"）。
+而 userdata 刷之前装着 **Android 的 f2fs/ext4**，不是零。
+于是：**镜像里是零的块，卡上保留的是安卓时代的旧数据。**
+
+这恰好解释了三件事：
+- 为什么坏原则上是"任意位置"（不依赖阈值）—— 但卷头/两棵小树所在的块恰好
+  在 sparse 里是 RAW（数据块），所以它们是对的；
+- 为什么坏字节是 **ASCII 文本**（安卓侧 / 内核镜像残留），不是 HFS 数据；
+- 为什么第 43 轮换 raw 重刷后**坏值全变了**（raw 把零也写了，覆盖成零）。
+
+#### 但 B/D 不能被 A 解释的部分
+
+如果全是 A，坏区里应当有**大段全零**。但日志里坏节点是**混杂**的
+（有 `.PRO`、有 `88c2b5b2` 乱码）。这更像"某些块没写、某些块写了别的"。
+
+**所以要实测，不要猜。** 别再靠四个节点推断了 —— 直接整段比对。
+
+#### 决定性工具：`tools/verify-card.py`（本轮新增，只读）
+
+```bash
+# 只比前 2 GiB，30 秒内出结果
+python tools/verify-card.py ios16-root.simg --map
 ```
-# 若成立，卡上 block 1734927 的内容应等于镜像的 block 686351
-adb shell sh /tmp/verify-flash.sh 686351
+
+它把卡上的字节**整段读回来**和镜像逐字节比，打印：
+
+- 第一个不一致的**绝对偏移**（不是靠节点号推的）
+- 两边的十六进制 + 可读文本
+- 一段一段的"匹配 / 不匹配"地图
+
+判读：
+
+| 输出 | 结论 | 修法 |
+|---|---|---|
+| 坏区里是**大段 00** | 假设 A：DONT_CARE 没写 —— 旧安卓数据残留 | **先擦分区再刷**（见下） |
+| 坏区从某个**固定偏移**开始且内容错位 | 假设 B/D：偏移回绕 | 换 fastboot / 换刷写通道 |
+| 坏区是**内核镜像的连续片段** | 写入源在总线层混入了别的数据 | 查 USB/内存，不是 fs 问题 |
+
+#### 如果是 A（最可能）：修法就一步 —— **先擦再刷**
+
+```bash
+fastboot erase userdata                    # 或 TWRP 里格式化 data
+fastboot -S 512M flash userdata ios16-root.simg
 ```
 
-把输出与 PC 上 `python check-hfs-root.py --node 19174 ios16-root.simg` 对照。
+擦过之后分区是确定的零，DONT_CARE 跳过也就无所谓了 —— 正是 mido 每次都从
+"Format Data" 或擦过的卷开始的原因。**这比任何脚本都简单，而且是标准做法。**
+
+> 补充：也可以让镜像**不含 DONT_CARE**：`sparse_img` 生成时把零写成
+> FILL(0) 而不是 DONT_CARE（rpi-imager 的 streaming encoder 就是这么做的，
+> 注释明说 "Without a bmap, zero blocks are FILL(0) to guarantee correctness
+> regardless of prior device state"）。这条路要改 CI，不急，先试 erase。
 
 ### 7. 本轮修掉的代码 bug（与刷写无关，但同样挡路）
 
@@ -181,14 +237,26 @@ adb shell sh /tmp/verify-flash.sh 686351
 
 ### 10. 下一步（顺序不能变）
 
-1. **先验证卡上数据**，不启动、不浪费一次启动：
-   `adb shell sh /tmp/verify-flash.sh 686351`
-2. 若回绕成立 → 病根在写入方。**照 mido 的做法重刷**：
-   `fastboot -S 512M flash userdata ios16-root.simg`
-   （刷 `.simg`，不刷 raw、不用任何自写脚本）
-3. 刷完**再跑一次** `verify-flash.sh`，四个节点全对上才启动。
-4. 启动新内核镜像，预期不再出现
+1. **先实测卡上数据**，不启动、不浪费一次启动：
+
+   ```bash
+   python tools/verify-card.py ios16-root.simg --map
+   ```
+
+   整段比对，不要再靠四个节点推断（前三轮就是那样错的）。
+
+2. **按判读结果修**：
+   - 坏区是大段 `00` → DONT_CARE 残留 → **先 `fastboot erase userdata` 再刷**
+   - 坏区从固定偏移开始 → 偏移回绕 → 换 fastboot / 换通道
+3. 重刷一律照 mido 一条命令：`fastboot -S 512M flash userdata ios16-root.simg`
+4. 刷完**再跑一次** `verify-flash.sh`，四个节点全对上才启动。
+5. 启动新内核镜像，预期不再出现
    `hfs_swap_BTNode: invalid forward link`，launchd 能读出文件。
+
+> **为什么"先 erase"值得当成首选**：`img2simg` 把零块写成 DONT_CARE，
+> fastboot 对 DONT_CARE 的语义是**跳过不写**。userdata 刷之前是安卓的
+> f2fs/ext4，不是零 —— 于是镜像里是零的地方，卡上留着安卓旧数据。
+> 这与"坏区里是 ASCII 残留"完全吻合。擦成零之后这个机制就失效了。
 
 ---
 
