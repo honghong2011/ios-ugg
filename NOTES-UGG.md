@@ -1,6 +1,64 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-23 02:20，第 57 轮）-- **重大发现：卡上的卷和镜像不是同一个卷**
+## ★★★★★ 最新（2026-11-23 07:05，第 58 轮）-- **拿到答案了：launchd 确实在镜像里**
+
+### 实测数据（CI 45078832992 的 `boot-files.txt`）
+
+```
+present  sbin/launchd        (541600 bytes, mode 755, root:root, exec)
+present  usr/lib/dyld        (922912 bytes, mode 755, root:root, exec)
+MISSING  bin/sh
+present  System/Library/xpc/launchd.plist (794692 bytes, mode 644, data)
+present  private/var (directory)
+present  private/etc (directory)
+present  private/var/db (directory)
+```
+
+### 结论
+
+**`/sbin/launchd` 在镜像里，541600 字节，权限 755，属主 root:root。**
+`/usr/lib/dyld` 也在，922912 字节，权限 755。
+
+所以手机上那句 `failed loading /sbin/launchd: errno 5` 里的 **errno 5 = EIO**，
+**只能是目录树读取失败**，不是文件不存在。
+
+> 这是第 56 轮提出的推断，现在是**实测**；不再是"日志一致于"，而是"文件在那儿，这是它的字节数"。
+
+### 这排除了什么
+
+| 之前的怀疑 | 现在 |
+|---|---|
+| launchd 不在镜像里 | ❌ 排除了。在，而且权限正确 |
+| dyld 缺失 | ❌ 排除了 |
+| 镜像构建不完整 | ❌ 排除了 |
+
+**所以问题确实在卡上那一侧** —— 而第 57 轮已经查明：卡上是**另一个卷**。
+
+### 顺带发现两个报告缺陷（已修）
+
+**1. plist 被标成 `NOT-EXEC`。**
+644 的 plist 本来就不该可执行，把它标成 NOT-EXEC 是噪音，
+而**在唯一重要的那一列里制造噪音，正是真实问题被忽略的方式**。
+现在只有 launchd / dyld 才用可执行位判定，其余显示 `data`。
+
+**2. `bin/sh` 缺失只说了一句 MISSING。**
+launchd 用 /bin/sh 起所有守护进程，缺了它**后面每个 shell 任务都会失败**。
+现在会明确 NOTE 出来。
+
+> 这两条都不致命，但都会在几轮之后才被发现。而它们之所以被发现，
+> 是因为**我认真读了那份输出**，而不是只看 RESULT 那一行。
+
+### 现在还缺什么
+
+| 项 | 状态 |
+|---|---|
+| 镜像健康 | ✅ 20480 节点全部有效 |
+| launchd / dyld 在且可执行 | ✅ 实测 |
+| 卡上是不是这份镜像 | ❌ **不是**（extent 差 81 / 121 块）|
+| `bin/sh` 缺失要不要紧 | ⚠️ 待评估 |
+
+---
+## （2026-11-23 02:20，第 57 轮）-- **重大发现：卡上的卷和镜像不是同一个卷**
 
 ### 数据
 
