@@ -71,8 +71,11 @@ UGG XCHECK:   single: 00 00 00 00 ...
 
 | 镜像 | cmdline 关键项 | sha256 |
 |---|---|---|
-| `shim-boot-0096-single.img` | `uggnomb=1` | `8b0374687543441c3a7f08cb7f5792c8dfdac0495b08cb087e395f5f594289f1` |
+| `shim-boot-0098-auto.img` | （无）默认单块 | `b0efc45309ff3b21057f03e040668f00643f7381f03be55025c189baa2c91b45` |
+| `shim-boot-0099-single.img` | `uggnomb=1` | `1fc70ff1614a0104f20391438bdf8d21c26fe3d701ba15bdff3b9db0be557748` |
+| `shim-boot-0100-xcheck.img` | `ugcheck=3` | `6f247d399c5d0d428dc41bc771d6707b7f8e9a6ad4871495955b471e412d1a81` |
 | `shim-boot-0097-check.img` | `ugcheck=2` | `8eb2ba8a0895248e2acb828e2d7a6807cd43c7bdbeddd51b024d21a7022eb5b9` |
+| `shim-boot-0096-single.img` | `uggnomb=1` | `8b0374687543441c3a7f08cb7f5792c8dfdac0495b08cb087e395f5f594289f1` |
 
 内核来自 CI `44917936947`（commit `7bba930`），shim 未变。
 
