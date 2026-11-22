@@ -119,19 +119,45 @@ SWEET LOG: flushed 7943 bytes to block 0xe8f3fa
 所以 **C 已被数据排除**（这点很关键，能省掉一次瞎猜），
 A / B / D 还需要实测才能分辨。
 
-#### 为什么 A 很有说服力
+#### 关于 A：我上一版的前提是错的，已去查源码核实
 
-`img2simg` 把零块写成 **DONT_CARE**（"这块不用管"）。
-fastboot 收到 DONT_CARE 的语义是**跳过、什么都不写**（rsync 的参考实现注释写得很直白：
-"DONT_CARE (skipped entirely — never transferred or written)"）。
-而 userdata 刷之前装着 **Android 的 f2fs/ext4**，不是零。
-于是：**镜像里是零的块，卡上保留的是安卓时代的旧数据。**
+上一版这里写的是"img2simg 把零块写成 DONT_CARE"。
+**这个说法只在加 `-s` 时成立，默认不成立。** AOSP `libsparse/sparse_read.cpp`：
 
-这恰好解释了三件事：
-- 为什么坏原则上是"任意位置"（不依赖阈值）—— 但卷头/两棵小树所在的块恰好
-  在 sparse 里是 RAW（数据块），所以它们是对的；
-- 为什么坏字节是 **ASCII 文本**（安卓侧 / 内核镜像残留），不是 HFS 数据；
-- 为什么第 43 轮换 raw 重刷后**坏值全变了**（raw 把零也写了，覆盖成零）。
+```c
+/* do_sparse_file_read_normal() */
+if (sparse_block) {
+    /* TODO: add flag to use skip instead of fill for buf[0] == 0 */
+    sparse_file_add_fill(s, buf[0], to_read, block);   /* 全同块 -> FILL */
+} else {
+    sparse_file_add_fd(s, fd, offset, to_read, block); /* 否则   -> RAW  */
+}
+```
+
+- "所有 32 位字都相同"的块（**包括全零**）→ **FILL**，不是 DONT_CARE。
+- 那条 TODO 写得很清楚："**add flag** to use skip instead of fill" ——
+  默认是 fill，skip 要显式开关。
+- `DONT_CARE` 只从 `write_sparse_skip_chunk()` 发出，那条路只有
+  `SPARSE_READ_MODE_HOLE` 才走，对应命令行 `img2simg -s`。
+  openembedded 的 0017 号补丁正是在加这个开关：
+  > "This adds support for converting files with holes to **don't care** chunks"
+
+**所以：如果 CI 用的是普通 `img2simg`，零块是 FILL(0)，fastboot 会把零一起写。**
+假设 A 就不成立 —— 除非这份 .simg 里真的有 DONT_CARE。
+
+#### 这个前提可以离线验证，不用碰手机
+
+```bash
+python ugg/tools/simg-info.py ios16-root.simg --list-dont-care
+```
+
+| 输出 | 结论 |
+|---|---|
+| `No DONT_CARE chunks` | **A 死刑** —— 零块是 FILL(0)，问题在别处 |
+| `DONT_CARE covers N GiB` | A 成立 —— 先 erase 再刷，并考虑 CI 改用不带 `-s` 的 img2simg |
+
+> 这条正是本项目反复吃亏的地方：先假设、后验证，而每个假设都能自圆其说。
+> 这次至少在把步骤交给你之前去读了实现。
 
 #### 但 B/D 不能被 A 解释的部分
 
@@ -157,24 +183,24 @@ python tools/verify-card.py ios16-root.simg --map
 
 | 输出 | 结论 | 修法 |
 |---|---|---|
-| 坏区里是**大段 00** | 假设 A：DONT_CARE 没写 —— 旧安卓数据残留 | **先擦分区再刷**（见下） |
-| 坏区从某个**固定偏移**开始且内容错位 | 假设 B/D：偏移回绕 | 换 fastboot / 换刷写通道 |
+| 坏区里是**大段 00，且 `simg-info` 报有 DONT_CARE** | A 成立：那些范围没被写 | **先 erase 再刷** |
+| 坏区里是大段 00，但 `simg-info` 报 **No DONT_CARE** | 那里本该是数据却被写成零 → 传输截断 | 查 USB / 重刷 / 换 fastboot |
+| 坏区从某个**固定偏移**开始且内容错位 | 偏移回绕 | 换 fastboot / 换刷写通道 |
 | 坏区是**内核镜像的连续片段** | 写入源在总线层混入了别的数据 | 查 USB/内存，不是 fs 问题 |
 
-#### 如果是 A（最可能）：修法就一步 —— **先擦再刷**
+#### 若 A 成立：修法一步 —— **先擦再刷**
 
 ```bash
 fastboot erase userdata                    # 或 TWRP 里格式化 data
 fastboot -S 512M flash userdata ios16-root.simg
 ```
 
-擦过之后分区是确定的零，DONT_CARE 跳过也就无所谓了 —— 正是 mido 每次都从
-"Format Data" 或擦过的卷开始的原因。**这比任何脚本都简单，而且是标准做法。**
+擦成确定的零以后，DONT_CARE 跳过也无所谓了 —— 这也是 mido 每次都从
+"Format Data" / 擦过的卷开始的原因。**标准做法，比任何脚本都简单。**
 
-> 补充：也可以让镜像**不含 DONT_CARE**：`sparse_img` 生成时把零写成
-> FILL(0) 而不是 DONT_CARE（rpi-imager 的 streaming encoder 就是这么做的，
-> 注释明说 "Without a bmap, zero blocks are FILL(0) to guarantee correctness
-> regardless of prior device state"）。这条路要改 CI，不急，先试 erase。
+> 顺带：`erase` 这一步**不管 A 成不成立都值得做**。它是幂等的，
+> 代价 1–2 分钟，却能把"旧数据残留"这个变量彻底消掉 —— 而在没消掉之前，
+> 任何实测结果都要先打一个问号。
 
 ### 7. 本轮修掉的代码 bug（与刷写无关，但同样挡路）
 
@@ -274,10 +300,10 @@ patch-report: applied=86 skipped=4      ← 4 个是外来补丁，我们的 008
 5. 启动新内核镜像，预期不再出现
    `hfs_swap_BTNode: invalid forward link`，launchd 能读出文件。
 
-> **为什么"先 erase"值得当成首选**：`img2simg` 把零块写成 DONT_CARE，
-> fastboot 对 DONT_CARE 的语义是**跳过不写**。userdata 刷之前是安卓的
-> f2fs/ext4，不是零 —— 于是镜像里是零的地方，卡上留着安卓旧数据。
-> 这与"坏区里是 ASCII 残留"完全吻合。擦成零之后这个机制就失效了。
+> **为什么"先 erase"值得当成首选**：不管 DONT_CARE 到底存不存在，
+> `erase` 都把"卡上残留旧数据"这个变量消掉，代价只有 1–2 分钟，而且是幂等的。
+> 在没消掉之前，任何实测结果都要先打个问号。
+> 先跑 `simg-info.py` 确认有没有 DONT_CARE，再跑 `verify-card.py` 看实际坏区。
 
 ---
 

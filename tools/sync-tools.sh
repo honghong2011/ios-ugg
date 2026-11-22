@@ -23,7 +23,7 @@ fi
 # The tools the user actually runs from that folder. Keep this list short: it is
 # what they double-click, not the whole toolbox.
 FILES="pull-log.cmd ugg-grab-log.sh sweetlog-decode.ps1 怎么取日志.txt \
-read-node.cmd read-node.sh verify-flash.sh verify-card.py \
+read-node.cmd read-node.sh verify-flash.sh verify-card.py simg-info.py \
 check-hfs-root.py check-raw.py compare-blocks.py find-bytes.py"
 
 [ -d "$DST" ] || { echo "missing $DST" >&2; exit 1; }
