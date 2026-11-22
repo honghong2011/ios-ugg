@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..c133196 100644
+index 6b926fe..a508aa5 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -948,7 +948,7 @@ index 6b926fe..c133196 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1497,118 @@ struct sweet_log_header {
+@@ -736,66 +1497,126 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -957,10 +957,20 @@ index 6b926fe..c133196 100644
 +static uint64_t sweet_log_written;	/* stream position already on the eMMC */
 +static uint32_t sweet_log_seq;		/* header sequence, bumped per write */
 +
-+/* First device block of the log area: just past the end of the partition. */
++/*
++ * First device block of the log area: the LAST SWEET_LOG_BLOCKS blocks of the
++ * partition, not past its end. (This comment said "just past the end of the
++ * partition", which contradicts the arithmetic below and reads as if the driver
++ * wrote outside userdata -- a scary thing to find when the catalog is damaged.
++ * Checked against the 0104 console: first=1376256 nblocks=13891579, log base
++ * 0xe8f3fa = 15266810, end 15267834 = the last block. Inside, 46 GiB above the
++ * highest catalog extent, so this code cannot have damaged the volume.)
++ */
 +static uint64_t
 +sweet_log_base(void)
-+{
+ {
+-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
 +	return su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +}
 +
@@ -983,9 +993,7 @@ index 6b926fe..c133196 100644
 + */
 +static int
 +sweet_log_write_locked(void)
- {
--	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
--	uint64_t flushed = 0, seq = 0;
++{
 +	uint64_t base = sweet_log_base();
  	void *bounce = (void *)(su.dma + DMA_BOUNCE);
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
@@ -1101,7 +1109,7 @@ index 6b926fe..c133196 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1618,114 @@ sweet_log_start(void)
+@@ -805,6 +1626,114 @@ sweet_log_start(void)
  	}
  }
  

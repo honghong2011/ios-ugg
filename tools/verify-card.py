@@ -163,6 +163,37 @@ def show(off, img_bytes, card_bytes, span=32):
     print("  card bytes as text: %r"
           % "".join(chr(c) if 32 <= c < 127 else "." for c in seg))
 
+    # Endianness check, because that distinguishes two very different faults and
+    # the difference decides what to fix.
+    #
+    # The 0104 console decodes like this: node 12288 holds "ORP." / "IMIX" as
+    # stored, which is ".PRO" / "XIMI" when each 32-bit word is byte-reversed.
+    # Those are the beginnings of ".PROXIMITY" and ".PHONE", i.e. catalog keys --
+    # so the card may hold the RIGHT bytes in the WRONG order, not foreign data.
+    #
+    # If reversing every 4 bytes turns the card's bytes into the image's bytes, the
+    # fault is a word-order bug (some path is swapping 32-bit words); if it does
+    # not, the content is simply wrong and the writer is at fault.
+    img_seg = img_bytes[first:first + span]
+
+    def swapped(b):
+        out = bytearray()
+        for i in range(0, len(b) - 3, 4):
+            out += b[i:i + 4][::-1]
+        return bytes(out)
+
+    rev = swapped(seg)
+    if rev and rev == img_seg[:len(rev)]:
+        print("  ** byte-reversed card == image: the card holds correct data in")
+        print("     word-swapped order. Look for a 32-bit swap in the write path,")
+        print("     not at the source image. **")
+    else:
+        match = sum(1 for a, b in zip(rev, img_seg) if a == b)
+        print("  byte-reversed card vs image: %d/%d bytes agree%s"
+              % (match, len(rev),
+                 "  (partial -- consistent with a swap)" if match > len(rev) // 2
+                 else "  (not a swap)"))
+
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
