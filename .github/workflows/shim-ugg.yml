@@ -4,13 +4,18 @@ name: shim-ugg
 # compiler, so it runs here; the final boot image (payload appended, gzip, DTB
 # bundle) is assembled locally by tools/, where the device DTB bundle lives
 # (device dumps are never committed).
-on:
+'on':
   push:
     branches: [ugg-port]
     paths:
       - 'shim/**'
       - '.github/workflows/shim-ugg.yml'
   workflow_dispatch:
+    inputs:
+      touch_rail:
+        description: 'Build with BOARD_TOUCH_RAIL=1 (test image: powers the touch controller)'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -24,8 +29,17 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio
 
       - name: Build shim
+        env:
+          # BOARD_TOUCH_RAIL=0 is the default and compiles input_setup() out, so the
+          # touch controller is never powered, released from reset or pinmuxed. A test
+          # image needs it on; board.h documents why that is a test, not a fix.
+          TOUCH_RAIL: ${{ inputs.touch_rail }}
         run: |
           set -o pipefail
+          if [ "$TOUCH_RAIL" = "true" ]; then
+            echo 'building with BOARD_TOUCH_RAIL=1 (touch test image)'
+            export EXTRA_CFLAGS="-DBOARD_TOUCH_RAIL=1"
+          fi
           ./shim/build.sh 2>&1 | tee build.log
 
       - name: Upload build log (on failure)
