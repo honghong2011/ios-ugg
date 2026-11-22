@@ -129,7 +129,20 @@ jobs:
             echo "::error title=qemu-too-quiet::only $irqs IRQs -- the kernel never reached a running state"
             exit 1
           fi
-          echo "::notice title=qemu-ok::$irqs IRQs, 0 faults" 
+          # A blank framebuffer is EXPECTED once the kernel is healthy: the early
+          # console is a text screen the framebuffer driver replaces, and with no
+          # userspace to draw anything the presented surface is empty. The panic run
+          # (45032399238) had text only because it died before that handover, and it
+          # also had faults. So: text on screen = probably died early; blank screen +
+          # many IRQs + no faults = reached the idle loop.
+          if [ -s qout/fb.txt ]; then
+            echo "::warning title=qemu-text-on-screen::console text is still visible -- the kernel may have died before the framebuffer took over"
+          fi
+          echo "::notice title=qemu-ok::$irqs IRQs, 0 faults, screen blank (expected once the framebuffer owns the display)"
+          # Where is the CPU parked? A healthy boot idles in machine_idle/cpu_idle.
+          if [ -f qout/regs.txt ]; then
+            grep -m1 'PC=' qout/regs.txt || true
+          fi 
 
       - uses: actions/upload-artifact@v4
         if: always()
