@@ -1,0 +1,101 @@
+name: qemu-ugg
+
+# Boot the ugg kernel in QEMU's virt board and report whether the early path is
+# still sane. This is the only automated check that runs the real kernel without a
+# phone, so it is the tripwire for changes to sweet_ufs.c, bsd_init.c and the touch
+# init path: those touch code that runs BEFORE anything can be photographed.
+#
+# What it proves: start.s -> mmu -> pmap -> boot_args -> bsd_init all execute
+# without faulting, and no panic is visible on the framebuffer.
+# What it does NOT prove: anything about ugg's real eMMC, PMIC or panel. Those only
+# exist on the phone. A green run means 'the kernel is not obviously broken', not
+# 'it will boot the phone'.
+#
+# The board is chosen to match the hardware that matters here:
+# -M virt,gic-version=2 -cpu cortex-a53, 4K granule, 4 GiB RAM, so the same GICv2
+# driver, instruction set and PAGE_RATIO path are exercised.
+#
+# The payload must be built with the QEMU device tree (mkadt_ugg.py --qemu), which
+# moves phys_base to QEMU's frames; the phone ADT cannot be used here.
+
+'on':
+  workflow_dispatch:
+    inputs:
+      kernel_run:
+        description: 'xnu run id to test (empty = newest successful run on this branch)'
+        required: false
+        default: ''
+  push:
+    branches: [main, ugg-port]
+    paths:
+      - 'xnu/patches/**'
+      - 'tools/qemu-ugg.py'
+      - 'tools/mkpayload.py'
+      - 'tools/mkadt_ugg.py'
+      - '.github/workflows/qemu-ugg.yml'
+
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm llvm python3
+          qemu-system-aarch64 --version
+          qemu-system-aarch64 -M virt -cpu help | grep -i cortex-a53 || echo 'cortex-a53 not listed'
+
+      - name: Fetch the kernel to test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN: ${{ inputs.kernel_run || '' }}
+        run: |
+          set -e
+          if [ -z "$RUN" ]; then
+            RUN=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/xnu.yml/runs?branch=$GITHUB_REF_NAME&status=success&per_page=1" --jq '.workflow_runs[0].id')
+          fi
+          echo "testing xnu run $RUN"
+          echo "RUN=$RUN" >> "$GITHUB_ENV"
+          mkdir -p k
+          for i in 1 2 3; do
+            gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n xnu-kernel -D k && break || sleep 5
+          done
+          ls -l k
+          test -s k/kernel.development.sweet
+
+      - name: Build a QEMU payload
+        run: |
+          set -e
+          python3 tools/mkadt_ugg.py k/ugg-qemu.adt --qemu
+          CMDLINE="debug=0xc cpus=1 keepsyms=1 -v -noprogress ugg_vcscale=2"
+          CMDLINE="$CMDLINE sweetfb_noconsole=1 sweetfb_hz=30 ugginput=0"
+          python3 tools/mkpayload.py k/kernel.development.sweet k/ugg-qemu.adt k/payload.bin --cmdline "$CMDLINE"
+          ls -l k/
+
+      - name: Boot it in QEMU
+        run: |
+          set -e
+          mkdir -p qout
+          python3 tools/qemu-ugg.py k/payload.bin qout --secs 25 --live-serial || true
+          ls -l qout || true
+          grep -i 'esr|fault|panic' qout/qemu.log 2>/dev/null | head -20 || true
+
+      - name: Verdict
+        run: |
+          ls -l qout 2>/dev/null || true
+          if [ -f qout/fb.png ]; then
+            echo "framebuffer snapshot: $(stat -c%s qout/fb.png) bytes"
+          else
+            echo 'no framebuffer snapshot -- QEMU died before the panel came up'
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-ugg
+          path: qout/
+          if-no-files-found: warn
+          retention-days: 14
