@@ -79,7 +79,11 @@ jobs:
         run: |
           set -e
           mkdir -p qout
-          python3 tools/qemu-ugg.py k/payload.bin qout --secs 25 --live-serial || true
+          # --kernel lets the tool decode the framebuffer with the kernel's own
+          # iso_font, so the console text is readable instead of being a PNG we
+          # cannot diff. llvm-nm is installed above for exactly this.
+          python3 tools/qemu-ugg.py k/payload.bin qout --secs 25 \
+              --kernel k/kernel.development.sweet || true
           ls -l qout || true
           grep -i 'esr|fault|panic' qout/qemu.log 2>/dev/null | head -20 || true
 
@@ -103,6 +107,15 @@ jobs:
           echo "faults    : $faults"
           if [ -f qout/fb.png ]; then
             echo "framebuffer: $(stat -c%s qout/fb.png) bytes"
+          fi
+          if [ -f qout/fb.txt ]; then
+            echo '--- console text decoded from the framebuffer ---'
+            # The screen is a scrolling console: the last lines are where the kernel
+            # stopped, so show the tail.
+            tail -25 qout/fb.txt
+            echo '--- end ---'
+          else
+            echo 'no fb.txt -- --kernel text decoding did not run'
           fi
           if [ "$faults" -gt 0 ]; then
             echo "::error title=qemu-fault::kernel faulted $faults time(s) -- see qemu-ugg artifact"
