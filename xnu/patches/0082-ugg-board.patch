@@ -1283,10 +1283,10 @@ index 6b926fe..ec7d2cf 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..a7370f8
+index 0000000..2565862
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,564 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
@@ -1607,26 +1607,47 @@ index 0000000..a7370f8
 +	}
 +}
 +
++/*
++ * Map a raw report onto the panel. Both functions take the raw value ALREADY
++ * chosen for the screen axis they produce, so the swap decision lives in exactly
++ * one place -- the caller -- instead of being made here as well.
++ *
++ * It used to be made in both: gt_scale_x() picked its divisor with
++ * (gt_swap_xy ? gt_max_y : gt_max_x) while the caller also passed ry or rx. The
++ * two agreed, so nothing was broken, but the same decision written twice means a
++ * later edit to one silently breaks the other -- and this code cannot be
++ * exercised on the device yet, so such a break would surface as "touch is
++ * slightly off" long after the change.
++ */
 +static int
-+gt_scale_x(int raw)
++gt_scale_to(int raw, int span, int panel)
 +{
-+	int span = gt_swap_xy ? gt_max_y : gt_max_x;
 +	if (span <= 0) {
 +		return 0;
 +	}
-+	int v = (int)(((int64_t)raw * PANEL_W) / span);
-+	return v < 0 ? 0 : (v > PANEL_W - 1 ? PANEL_W - 1 : v);
++	int v = (int)(((int64_t)raw * panel) / span);
++	return v < 0 ? 0 : (v > panel - 1 ? panel - 1 : v);
 +}
 +
-+static int
-+gt_scale_y(int raw)
++/*
++ * Pick the raw axis each screen axis comes from, and the matching maximum.
++ * This is the ONLY place gt_swap_xy is consulted for coordinates: the scale
++ * function takes both the value and its span, and never looks at the flag.
++ */
++static void
++gt_axes(int rx, int ry, int *raw_x, int *span_x, int *raw_y, int *span_y)
 +{
-+	int span = gt_swap_xy ? gt_max_x : gt_max_y;
-+	if (span <= 0) {
-+		return 0;
++	if (gt_swap_xy) {
++		*raw_x = ry;
++		*span_x = gt_max_y;
++		*raw_y = rx;
++		*span_y = gt_max_x;
++	} else {
++		*raw_x = rx;
++		*span_x = gt_max_x;
++		*raw_y = ry;
++		*span_y = gt_max_y;
 +	}
-+	int v = (int)(((int64_t)raw * PANEL_H) / span);
-+	return v < 0 ? 0 : (v > PANEL_H - 1 ? PANEL_H - 1 : v);
 +}
 +
 +/* ---------------- poller ---------------- */
@@ -1716,8 +1737,10 @@ index 0000000..a7370f8
 +						if (id >= GT_POINTS) {
 +							continue;
 +						}
-+						int x = gt_scale_x(gt_swap_xy ? ry : rx);
-+						int y = gt_scale_y(gt_swap_xy ? rx : ry);
++						int raw_x, span_x, raw_y, span_y;
++						gt_axes(rx, ry, &raw_x, &span_x, &raw_y, &span_y);
++						int x = gt_scale_to(raw_x, span_x, PANEL_W);
++						int y = gt_scale_to(raw_y, span_y, PANEL_H);
 +						seen[id] = true;
 +						if (!fdown[id] || x != fx[id] || y != fy[id]) {
 +							sweet_hid_touch((int)id, 1, x, y);
