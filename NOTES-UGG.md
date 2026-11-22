@@ -230,10 +230,31 @@ fastboot -S 512M flash userdata ios16-root.simg
 
 | 项 | 值 |
 |---|---|
-| commit | `5636d9e` |
-| 内核 CI | **45026532243** |
+| commit | `5636d9e`（初版）→ **`722fbe0`（最终版）** |
+| 内核 CI | **45027157342 —— completed success** |
+| 内核 sha256 | `b82e6036f297c6917d90d5f78fab819adc70184359743711e850d3ac44136aba`（17,140,512 B） |
 | 改动 | 触摸坐标空间 + 边缘判定 + clamp；PON 节流；挂载后启动；verify-flash 偏移；printf |
 | 删除 | `tools/write-image.{py,sh,cmd}`（用户明确否决的分块写入器） |
+| 新增 | `tools/verify-card.py`（只读整段比对）、`tools/ppcheck.py`（预处理后括号自检）、`tools/sync-tools.sh` |
+
+CI 的判读（`kernel-ugg-symbols` 注解）：
+
+```
+ugg_gic_ack ugg_gic_eoi ugg_gic_send_sgi ugg_vm4k UGG INPUT UGG EMMC sweet_early_mark
+patch-report: applied=86 skipped=4      ← 4 个是外来补丁，我们的 0082 已应用
+```
+
+`UGG INPUT` 在符号表里，说明触摸驱动确实编进去了。
+
+### 9.1 本轮自己踩的坑（写下来省下一次）
+
+写了个「数括号」的自检脚本，第一版**不区分 `#if` 分支**，
+把 `UGG_BOARD=1` 和 `=0` 两套函数体一起数，于是报 `sweet_ufs.c` 少一个 `}`，
+害我差点去翻一个不存在的语法错误。改成按分支预处理后，四个文件在两种配置下
+都是 `braces=+0 parens=+0 brackets=+0`。
+
+**取证工具必须先拿已知正确的输入验一遍** —— 这已经是第四次栽在同一个坑里了
+（`verify-flash.sh` 偏移、`check-hfs-root.py` 魔数、块号差 15、本次括号计数）。
 
 ### 10. 下一步（顺序不能变）
 
