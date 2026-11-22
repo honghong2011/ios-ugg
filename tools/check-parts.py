@@ -115,10 +115,45 @@ def main():
         print('  part %2d starts at %7.3f GiB%s' % (i + 1, g, mark))
     print()
     if inside:
-        print('=> Part(s) %s start inside the damaged bracket.' % inside)
+        print('=> A part boundary falls inside the damaged bracket.')
+        print()
+        # A boundary inside the bracket is necessary but NOT sufficient: one bad
+        # part damages exactly ONE part-sized window and stops. If the damage is
+        # known to continue past that window -- e.g. the walk found every node in
+        # two consecutive extents bad -- a single bad part cannot explain it, and
+        # the bracket is wide only because the clean and damaged extents sit far
+        # apart with no nodes in the gap.
+        span_end = None
+        mm = re.findall(r'ext(\d+) block (\d+) count (\d+) -> nodes (\d+)\.\.(\d+)',
+                        text)
+        damaged_exts = []
+        for _i, blk, cnt, lo, hi in mm:
+            n_lo, n_hi = int(lo), int(hi)
+            if n_lo <= first_bad_node <= n_hi or first_bad_node < n_lo:
+                damaged_exts.append((int(blk), int(cnt)))
+        if len(damaged_exts) >= 2:
+            span_end = (damaged_exts[-1][0] + damaged_exts[-1][1]) * BS / 2 ** 30
+            span_gib = span_end - hi_gib
+            boundaries = [i * part_gib for i in range(1, nparts)
+                          if hi_gib < i * part_gib < span_end]
+            print('   BUT the damage is contiguous across %d extents:' % len(damaged_exts))
+            print('     %.3f GiB .. %.3f GiB  (>= %.2f GiB)' % (hi_gib, span_end, span_gib))
+            print('     part boundaries crossed inside it: %s'
+                  % [round(b, 3) for b in boundaries])
+            print()
+            print('   A single corrupt part would damage exactly one %.2f GiB window'
+                  % part_gib)
+            print('   and stop. This span crosses %d boundary(ies) and continues, so'
+                  % len(boundaries))
+            print('   one bad part CANNOT explain it.')
+            print()
+            print('   => The evidence favours a TRUNCATED WRITE: everything past some')
+            print('      stop point is stale, which produces exactly this shape --')
+            print('      a clean prefix and a contiguous damaged tail.')
+            print('      verify-card.py first divergence IS that stop point.')
+            return 1
         print('   The "one bad part" hypothesis is ALIVE. Cheapest test: re-download')
-        print('   only those parts, reassemble, and compare the same region again.')
-        print('   If the damage moves or disappears, the transfer was never at fault.')
+        print('   the parts named above, reassemble, and compare the same region.')
         return 1
     print('=> No part boundary falls inside the bracket.')
     print('   The damage did not start at a part edge, so a single corrupt part')
