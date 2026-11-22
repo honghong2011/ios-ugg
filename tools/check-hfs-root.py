@@ -366,8 +366,39 @@ def dump_block(img, blocksize, block, count, blkargs):
             print("  -> first 8 bytes as text: %r" % data[:8].decode("latin-1"))
 
 
+def decode_node(img, blocksize, fork, node, node_size, total_nodes, label):
+    """Resolve a catalog node number to an image offset and decode its header."""
+    covered = 0
+    for start, count in fork.extents:
+        ext_bytes = count * blocksize
+        nodes_in_ext = ext_bytes // node_size
+        if node < covered + nodes_in_ext:
+            within = node - covered
+            off = start * blocksize + within * node_size
+            print("  %s node %d -> image block %d (byte 0x%x)"
+                  % (label, node, off // blocksize, off))
+            d = img.read(off, 16)
+            if len(d) < 16:
+                print("    unreadable")
+                return
+            fl = be32(d, 0)
+            bl = be32(d, 4)
+            kind = d[8]
+            nr = be16(d, 10)
+            print("    fLink=0x%08x bLink=0x%08x kind=0x%02x numRecords=%d"
+                  % (fl, bl, kind, nr))
+            ok = (kind in (0, 1, 2, 0xFF)) and fl < total_nodes and bl < total_nodes
+            print("    -> %s" % ("VALID b-tree node" if ok else "INVALID"))
+            if not ok:
+                print("    first 8 bytes as text: %r" % d[:8].decode("latin-1"))
+            return
+        covered += nodes_in_ext
+    print("  %s node %d is beyond the fork's nodes" % (label, node))
+
+
 def main():
     blkargs = None
+    nodeargs = None
     argv = sys.argv[1:]
     if "--dump" in argv:
         i = argv.index("--dump")
@@ -386,6 +417,20 @@ def main():
             print("--dump needs a block number and an optional byte count")
             return 2
         blkargs = (nums[0], nums[1] if len(nums) > 1 else 256)
+        del argv[i:i + 1 + consumed]
+    if "--node" in argv:
+        i = argv.index("--node")
+        nodeargs = []
+        consumed = 0
+        for a in argv[i + 1:]:
+            try:
+                nodeargs.append(int(a, 0))
+                consumed += 1
+            except ValueError:
+                break
+        if not nodeargs:
+            print("--node takes one or more node numbers")
+            return 2
         del argv[i:i + 1 + consumed]
     args = [a for a in argv if not a.startswith("-")]
     walk_all = "--all" in sys.argv
@@ -465,6 +510,19 @@ def main():
     if blkargs is not None:
         print()
         dump_block(img, blocksize, blkargs[0], blkargs[1], blkargs)
+        return 0
+
+    if nodeargs is not None:
+        print()
+        print("Catalog nodes in the image")
+        cfork = Fork(vh, CATALOG_FORK_OFF, "catalog")
+        bt = BTree(img, cfork, blocksize, "catalog")
+        bt.load_header()
+        print("  node size %d, %d nodes, extents %d"
+              % (bt.node_size, bt.total_nodes, len(cfork.extents)))
+        for n in nodeargs:
+            decode_node(img, blocksize, cfork, n, bt.node_size,
+                        bt.total_nodes, "catalog")
         return 0
 
     print()
