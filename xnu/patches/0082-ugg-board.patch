@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..f08930e 100644
+index 6b926fe..634d1ca 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -559,7 +559,7 @@ index 6b926fe..f08930e 100644
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -583,6 +1031,241 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+@@ -583,6 +1031,271 @@ static const struct cdevsw sweet_ufs_cdevsw = {
  	.d_type       = D_DISK,
  };
  
@@ -582,71 +582,97 @@ index 6b926fe..f08930e 100644
 +static void
 +ugg_crosscheck(void)
 +{
-+	/* Three regions: the volume header, the last catalog extent the failure
-+	 * names, and a plain slab in the middle of the partition. */
-+	static const uint64_t regions[][2] = {
-+		{ 0, 64 },              /* volume header / allocation blocks */
-+		{ 1734912, 256 },       /* image block of catalog node 19174 (2 MiB) */
-+		{ 1735170, 256 },       /* second half of the same extent */
-+		{ 800000, 256 },        /* arbitrary middle-of-partition slab */
-+	};
++	/*
++	 * The failure tracks read SIZE, not position: the volume header and the
++	 * catalog header (one 4 KiB block each) come back correct, while every
++	 * 1 MiB walk of the tree is wrong. So read the same region two ways --
++	 * one large transfer, then 4 KiB at a time -- and compare.
++	 *
++	 * No external reference is needed, and neither shape is trusted.
++	 */
++	static uint8_t big[BOUNCE_SIZE] __attribute__((aligned(64)));
++	/* 1 MiB starting at the catalog node the kernel rejects (node 19174). */
++	uint64_t first = 1734912;
++	uint32_t blocks = BOUNCE_SIZE / UFS_BLOCK;
 +
-+	static uint8_t snap[BOUNCE_SIZE] __attribute__((aligned(64)));
-+	uint8_t *a = (uint8_t *)(su.dma + DMA_BOUNCE);   /* the live bounce buffer */
-+	uint8_t *b = snap;                               /* the multi-block copy */
-+	int saved = ugg_no_multiblock;
-+
-+	printf("UGG XCHECK: comparing multi-block against single-sector reads\n");
-+	for (unsigned r = 0; r < sizeof(regions) / sizeof(regions[0]); r++) {
-+		uint64_t first = regions[r][0];
-+		uint32_t count = (uint32_t)regions[r][1];
-+		uint32_t bytes = count * UFS_BLOCK;
-+
-+		if (bytes > BOUNCE_SIZE) {
-+			printf("UGG XCHECK: r%u region too large\n", r);
-+			continue;
-+		}
-+		ugg_no_multiblock = 0;
-+		if (ufs_read_blocks(su.first_block + first, count)) {
-+			printf("UGG XCHECK: r%u multi-block read failed\n", r);
-+			continue;
-+		}
-+		memcpy(b, a, bytes);
++	{
++		uint8_t *a = (uint8_t *)(su.dma + DMA_BOUNCE);
++		int saved = ugg_no_multiblock;
 +
 +		ugg_no_multiblock = 1;
-+		if (ufs_read_blocks(su.first_block + first, count)) {
-+			printf("UGG XCHECK: r%u single-sector read failed\n", r);
-+			continue;
-+		}
 +
-+		uint32_t diff = 0;
-+		uint32_t first_diff = 0xffffffff;
-+		for (uint32_t i = 0; i < bytes; i++) {
-+			if (a[i] != b[i]) {
-+				if (!diff) {
-+					first_diff = i;
++		printf("UGG SIZE: one %u KiB transfer at block %llu\n",
++		    (blocks * UFS_BLOCK) >> 10, first);
++		if (ufs_read_blocks(su.first_block + first, blocks)) {
++			printf("UGG SIZE: large read failed\n");
++			ugg_no_multiblock = saved;
++			return;
++		}
++		memcpy(big, a, BOUNCE_SIZE);
++
++		printf("UGG SIZE: same region as %u separate 4 KiB reads\n", blocks);
++		uint32_t mism = 0, first_mis = 0xffffffff;
++		for (uint32_t i = 0; i < blocks; i++) {
++			if (ufs_read_blocks(su.first_block + first + i, 1)) {
++				printf("UGG SIZE: small read %u failed\n", i);
++				ugg_no_multiblock = saved;
++				return;
++			}
++			for (uint32_t q = 0; q < UFS_BLOCK; q++) {
++				if (big[i * UFS_BLOCK + q] != a[q]) {
++					if (!mism) {
++						first_mis = i * UFS_BLOCK + q;
++					}
++					mism++;
 +				}
-+				diff++;
 +			}
 +		}
-+		if (!diff) {
-+			printf("UGG XCHECK: r%u block %llu (%u KiB) identical\n",
-+			    r, first, bytes >> 10);
++		ugg_no_multiblock = saved;
++
++		if (!mism) {
++			printf("UGG SIZE: identical -- read size is not the fault\n");
 +		} else {
-+			printf("UGG XCHECK: r%u block %llu (%u KiB) DIFFERS in %u bytes, first at +0x%x\n",
-+			    r, first, bytes >> 10, diff, first_diff);
-+			printf("UGG XCHECK:   multi :");
++			printf("UGG SIZE: DIFFER in %u of %u bytes, first at +0x%x (block %u)\n",
++			    mism, BOUNCE_SIZE, first_mis, first_mis / UFS_BLOCK);
++			printf("UGG SIZE:   large:");
 +			for (int q = 0; q < 16; q++) {
-+				printf(" %02x", b[(first_diff & ~15u) + (uint32_t)q]);
++				printf(" %02x", big[(first_mis & ~15u) + (uint32_t)q]);
 +			}
-+			printf("\nUGG XCHECK:   single:");
-+			for (int q = 0; q < 16; q++) {
-+				printf(" %02x", a[(first_diff & ~15u) + (uint32_t)q]);
++			printf("\nUGG SIZE:   small:");
++			{
++				/* re-read that one block to show the other side */
++				uint32_t blk = first_mis / UFS_BLOCK;
++				if (!ufs_read_blocks(su.first_block + first + blk, 1)) {
++					uint32_t base = first_mis & ~15u;
++					for (int q = 0; q < 16; q++) {
++						printf(" %02x",
++						    a[(base - blk * UFS_BLOCK) + (uint32_t)q]);
++					}
++				}
 +			}
 +			printf("\n");
 +		}
 +	}
-+	ugg_no_multiblock = saved;
++
++	/* Also report the descriptor of the four guilty nodes, read 4 KiB at a time. */
++	{
++		static const uint32_t nodes[4] = { 19174, 19193, 19462, 19514 };
++		static const uint32_t nodeblk[4] = { 1734927, 1734965, 1735503, 1735607 };
++		uint8_t *a = (uint8_t *)(su.dma + DMA_BOUNCE);
++		ugg_no_multiblock = 1;
++		for (int i = 0; i < 4; i++) {
++			if (ufs_read_blocks(su.first_block + nodeblk[i], 2)) {
++				printf("UGG SIZE: node %u read failed\n", nodes[i]);
++				continue;
++			}
++			uint32_t fl = (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 |
++			    (uint32_t)a[2] << 8 | a[3];
++			uint32_t bl = (uint32_t)a[4] << 24 | (uint32_t)a[5] << 16 |
++			    (uint32_t)a[6] << 8 | a[7];
++			printf("UGG SIZE: node %u small-read fLink=0x%08x bLink=0x%08x kind=0x%02x\n",
++			    nodes[i], fl, bl, a[8]);
++		}
++	}
 +}
 +
 +/*
@@ -674,8 +700,12 @@ index 6b926fe..f08930e 100644
 +	if (!mode) {
 +		return;
 +	}
++	if (mode == 1) {
++		/* The size test answers the question the tree walk can only hint at. */
++		ugg_crosscheck();
++	}
 +	if (mode == 3) {
-+		/* Transfer-shape comparison only; the b-tree walk below is not run. */
++		/* Read-size comparison only; the b-tree walk below is not run. */
 +		ugg_crosscheck();
 +		return;
 +	}
@@ -801,7 +831,7 @@ index 6b926fe..f08930e 100644
  static int
  sweet_ufs_init(void)
  {
-@@ -592,9 +1275,16 @@ sweet_ufs_init(void)
+@@ -592,9 +1305,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -818,7 +848,7 @@ index 6b926fe..f08930e 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -606,8 +1296,18 @@ sweet_ufs_init(void)
+@@ -606,8 +1326,18 @@ sweet_ufs_init(void)
  	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
@@ -837,7 +867,7 @@ index 6b926fe..f08930e 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1323,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1353,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -852,7 +882,7 @@ index 6b926fe..f08930e 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1353,43 @@ sweet_ufs_init(void)
+@@ -651,15 +1383,43 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -899,7 +929,7 @@ index 6b926fe..f08930e 100644
  	return 0;
  }
  
-@@ -669,7 +1399,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1429,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -908,7 +938,7 @@ index 6b926fe..f08930e 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1408,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1438,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -917,7 +947,7 @@ index 6b926fe..f08930e 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1466,118 @@ struct sweet_log_header {
+@@ -736,66 +1496,118 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -929,9 +959,7 @@ index 6b926fe..f08930e 100644
 +/* First device block of the log area: just past the end of the partition. */
 +static uint64_t
 +sweet_log_base(void)
- {
--	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
--	uint64_t flushed = 0, seq = 0;
++{
 +	return su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +}
 +
@@ -954,14 +982,18 @@ index 6b926fe..f08930e 100644
 + */
 +static int
 +sweet_log_write_locked(void)
-+{
+ {
+-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
 +	uint64_t base = sweet_log_base();
  	void *bounce = (void *)(su.dma + DMA_BOUNCE);
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
 +	uint64_t todo = (total < SWEET_LOG_SIZE) ? total : SWEET_LOG_SIZE;
 +	uint64_t blocks = (todo + UFS_BLOCK - 1) / UFS_BLOCK;
 +	int error = 0;
-+
+ 
+-	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+-	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
 +	for (uint64_t done = 0; done < blocks && !error; ) {
 +		uint64_t chunk = MIN(blocks - done, (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
 +		size_t bytes = (size_t)(chunk * UFS_BLOCK);
@@ -987,9 +1019,7 @@ index 6b926fe..f08930e 100644
 +	}
 +	return error;
 +}
- 
--	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
--	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
++
 +static void
 +sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 +{
@@ -1070,7 +1100,7 @@ index 6b926fe..f08930e 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1587,102 @@ sweet_log_start(void)
+@@ -805,6 +1617,102 @@ sweet_log_start(void)
  	}
  }
  
