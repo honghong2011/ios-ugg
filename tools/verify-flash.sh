@@ -56,10 +56,54 @@ dump() {
     echo
 }
 
+# These expectations came from one particular image download, and the layout of
+# the catalog changes whenever the image is rebuilt: the volume CI builds now puts
+# node 19174 at block 1735048, not 1734927. Checking a fresh flash against the
+# numbers below would then report a mismatch on a perfectly good write -- and that
+# mismatch looks exactly like the fault this script exists to find.
+#
+# So they are only a fallback. Generate the correct ones from the image you actually
+# flashed and pass the file as the first argument:
+#
+#   python ugg/tools/emit-flash-expectations.py ios16-root.simg > expect.txt
+#   adb push expect.txt /tmp/ && adb push verify-flash.sh /tmp/
+#   adb shell sh /tmp/verify-flash.sh /tmp/expect.txt
+#
+# Without a file the script still runs, but says plainly which layout it assumes.
+EXPECT_FILE=
+for a in "$@"; do
+    case "$a" in
+        /*.txt|*.txt) EXPECT_FILE=$a ;;
+    esac
+done
+
+if [ -n "$EXPECT_FILE" ] && [ -f "$EXPECT_FILE" ]; then
+    echo "expectations from: $EXPECT_FILE"
+    # Lines look like: dump BLOCK "HEX16" "  (node N, kind)"
+    while IFS= read -r line; do
+        case "$line" in
+            dump\ *)
+                # 'dump BLOCK "HEX" "label"' -> pull each field out separately.
+                blk=$(echo "$line" | sed -n "s/^dump \\([0-9][0-9]*\\) .*/\\1/p")
+                hex=$(echo "$line" | sed -n "s/^dump [0-9][0-9]* \"\([^\"]*\)\".*/\\1/p")
+                lbl=$(echo "$line" | sed -n "s/^dump [0-9][0-9]* \"[^\"]*\" *//p")
+                dump "$blk" "$hex" "  $lbl"
+                ;;
+        esac
+    done < "$EXPECT_FILE"
+else
+    if [ -n "$EXPECT_FILE" ]; then
+        echo "WARNING: no expectations file at $EXPECT_FILE -- using built-in values,"
+        echo "         which match ONE particular image build. If the card disagrees,"
+        echo "         generate the file with emit-flash-expectations.py before blaming"
+        echo "         the flash."
+        echo
+    fi
 dump 1734927 "00 00 4a f9 00 00 00 05 ff 01 00 17 00 00 00 06" "  (node 19174, leaf)"
 dump 1734965 "00 00 01 fa 00 00 4a e6 ff 00 00 17 00 00 00 00" "  (node 19193, leaf)"
 dump 1735503 "00 00 00 00 00 00 4b 9a 00 00 00 b7 00 00 00 00" "  (node 19462, index)"
 dump 1735607 "00 00 00 02 00 00 4c 37 ff 00 00 1c 00 00 00 00" "  (node 19514, leaf)"
+fi
 
 echo
 echo "=== volume header: partition block 0, 1024 bytes in ==="
