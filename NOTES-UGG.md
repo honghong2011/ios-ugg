@@ -1,6 +1,87 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-22 21:10，第 44 轮）-- **0104 全日志到手：坏区有确切边界，第 43 轮的结论要改**
+## ★★★★★ 最新（2026-11-22 22:30，第 45 轮）-- **QEMU 立刻抓出我自己写的一个致命 bug**
+
+### 这一轮最重要的一句话
+
+**上一轮我宣布"0105 镜像已就绪、可以刷"的那个镜像，开机就会 panic。**
+而它"就绪"的依据是：内核 sha256 对得上、cmdline 也对得上 —— **两条检查都过了**。
+**镜像照样起不来，因为没有任何东西真正执行过它。**
+
+### QEMU 怎么发现的
+
+我加了个 CI 工作流（\.github/workflows/qemu-ugg.yml）：每次内核构建后，用
+QEMU 的 virt 板（\`-M virt,gic-version=2 -cpu cortex-a53\`，4 GiB）
+把真内核跑 25 秒，然后截图帧缓冲。
+
+第一次跑，屏幕上是：
+
+\`\`\`
+SWEET EARLY 1: arm_init entered (MMU on)
+...
+SWEET EARLY 7: entering arm_vm_init
+
+SWEET EARLY PANIC: Expected 64 seed bytes from bootloader, but got 48.
+@prng_random.c:64
+\`\`\`
+
+### 根因：我自己在 \`a6a739d\` 引入的
+
+上一轮为了"镜像可复现"，我把 ADT 的随机种子从 \`os.urandom(64)\` 改成：
+
+\`\`\`python
+hashlib.sha384(...).digest()[:64]      # sha384 只有 48 字节！
+\`\`\`
+
+而 \`osfmk/prng/prng_random.c:59\`：
+
+\`\`\`c
+n = PE_get_random_seed(seed, sizeof(seed));       /* sizeof(seed) == 64 */
+if (n < sizeof(seed)) {
+    panic("Expected %lu seed bytes from bootloader, but got %u.", ...);
+}
+\`\`\`
+
+**种子不足 64 字节 = 致命 panic，在 \`arm_vm_init\` 之后立刻发生。**
+
+### 修复（commit \`36be11a\`）
+
+- \`sha384\` → **\`sha512\`**（正好 64 字节，仍然确定性）
+- 加一条构建期断言：种子不足 64 字节就直接报错，不让这种 bug 再悄悄溜过去
+
+### 修完的 QEMU 复验：干净
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| 屏幕 | **EARLY PANIC** 文字 | 黑屏（控制台已滚过） |
+| qemu.log | 7 条 Undefined Instruction + 反复 Prefetch Abort | **83 KB，368 条异常，全部是 IRQ** |
+| 故障/panic 条数 | 有 | **0** |
+| IRQ 返回点 | — | 363 次落在 \`machine_idle + 0xfc\` |
+
+\`machine_idle\` 是内核的**空闲循环** —— 说明内核不但没崩，还稳定跑着、
+在正常处理定时器中断。失控的 IRQ 风暴不会把返回点集中在 idle 里。
+
+### 这轮学到的（写进纪律）
+
+1. **"哈希对得上"不是"能启动"**。sha256 校验只证明文件没被改，
+   完全不能证明它里面的代码能跑。
+2. **能在 CI 上跑的东西，就必须在 CI 上跑**。这个 bug 修一次 CI 大约 3 分钟；
+   要是没加这一步，就是在手机上浪费一次 8 分钟启动 + 一次取日志，
+   而且日志里只会看到一条 panic，还得再来一轮。
+3. 我上一轮把"可复现"当成纯粹的改进，改完只验了"两次构建哈希相同"，
+   **没有验"构建出来的东西还能启动"** —— 这正是 QEMU 存在的意义。
+
+### 本轮产物
+
+| 项 | 值 |
+|---|---|
+| commit | \`36be11a\`（种子修复）、\`01b5368\`（QEMU 工作流） |
+| QEMU CI | 45032399238（发现 bug）、**45032900290（修复后干净）** |
+| 镜像 | \`shim-boot-0105-touch.img\` 已用修复后的种子重建 |
+
+---
+
+## （2026-11-22 21:10，第 44 轮）-- **0104 全日志到手：坏区有确切边界，第 43 轮的结论要改**
 
 > 纠错声明：第 43 轮写的「根因在 fastboot 的 sparse 解析、只写了 11.15 GiB」
 > **是错的**。方向对（卡上数据确实不对），**推理链错**：
