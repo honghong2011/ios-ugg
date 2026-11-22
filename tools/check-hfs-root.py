@@ -393,6 +393,28 @@ def main():
               % blocksize)
         return 1
 
+    # Cross-check: does the allocation-block fire the extents point at hold
+    # b-tree nodes? A node descriptor is fLink/bLink/kind/numRecords/reserved,
+    # so kind must be a b-tree kind and the first two words must be small.
+    print()
+    print("What the extents actually point at")
+    for off, label in ((CATALOG_FORK_OFF, "catalog"),):
+        fork = Fork(vh, off, label)
+        for i, (start, count) in enumerate(fork.extents):
+            probe = img.read(start * blocksize, 32)
+            if len(probe) < 32:
+                print("  %s ext%d: unreadable" % (label, i))
+                continue
+            fl = be32(probe, 0)
+            bl = be32(probe, 4)
+            kind = probe[8]
+            printable = all(32 <= c < 127 for c in probe[:8])
+            verdict = "looks like a b-tree node" if (kind in (0, 1, 2, 0xFF)) else "does NOT look like a node"
+            print("  %s ext%d block %d: fLink=0x%08x bLink=0x%08x kind=0x%02x  %s"
+                  % (label, i, start, fl, bl, kind, verdict))
+            if printable:
+                print("      first 8 bytes are text: %r" % probe[:8].decode("latin-1"))
+
     print()
     print("B-trees")
     problems = []
