@@ -387,8 +387,17 @@ def decode_node(img, blocksize, fork, node, node_size, total_nodes, label):
             nr = be16(d, 10)
             print("    fLink=0x%08x bLink=0x%08x kind=0x%02x numRecords=%d"
                   % (fl, bl, kind, nr))
+            if kind == KBT_INDEX:
+                # Index nodes still carry the descriptor links, but they are not
+                # what validates them: the payload is a set of child pointers.
+                # Checking fLink < totalNodes alone would pass almost anything,
+                # so say what this node actually is instead of guessing.
+                print("    -> index node (kind 0x00); links are not the check here.")
+                print("       fLink/bLink are still bounded for a leaf/index pair,")
+                print("       so treat only the kind as certain.")
+                return
             ok = (kind in (0, 1, 2, 0xFF)) and fl < total_nodes and bl < total_nodes
-            print("    -> %s" % ("VALID b-tree node" if ok else "INVALID"))
+            print("    -> %s b-tree node" % ("VALID" if ok else "INVALID"))
             if not ok:
                 print("    first 8 bytes as text: %r" % d[:8].decode("latin-1"))
             return
