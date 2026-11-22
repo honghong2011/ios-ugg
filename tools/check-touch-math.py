@@ -156,9 +156,60 @@ def main():
     print('    pass --edge-space 1080x1920 to reproduce; the bottom and right')
     print('    edges then stop being flagged and the swipe gestures die there.')
 
+    # Invariant 5: the model must match the header it claims to model. Without
+    # this the defaults can silently drift from SweetHID.cpp and every green run
+    # afterwards is meaningless -- the same failure mode that made earlier
+    # 'verified' claims worthless.
+    print()
+    ok = drift_check(args) and ok
+
     print()
     print('=> all invariants hold' if ok else '=> INVARIANT FAILED')
     return 0 if ok else 1
+
+
+def drift_check(args):
+    """Compare this model's defaults against SweetHID.cpp's UGG defines."""
+    import os
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, '..', '..', 'xnu-src', 'iokit', 'Kernel', 'arm',
+                       'hid', 'SweetHID.cpp')
+    if not os.path.exists(src):
+        print('note: %s not found, skipping the model/code drift check' % src)
+        print('      (run this from a checkout that has xnu-src next to ugg/)')
+        return True
+    text = open(src, encoding='utf-8', errors='replace').read()
+
+    def one(name):
+        m = re.search(r'#define\s+%s\s+(\S+)' % name, text)
+        return m.group(1) if m else None
+
+    pairs = [
+        ('SWEET_TOUCH_SPACE_W', args.space_w),
+        ('SWEET_TOUCH_SPACE_H', args.space_h),
+    ]
+    bad = False
+    for name, mine in pairs:
+        theirs = one(name)
+        if theirs is None:
+            print('note: %s not found in SweetHID.cpp' % name)
+            continue
+        # NORM_* is defined in terms of SPACE_*, so resolve one level.
+        if theirs.startswith('SWEET_TOUCH_'):
+            theirs = one(theirs)
+        try:
+            v = int(theirs, 0)
+        except (TypeError, ValueError):
+            print('note: %s is %r, cannot compare' % (name, theirs))
+            continue
+        if v != mine:
+            bad = True
+            print('FAIL: model uses %s=%d but SweetHID.cpp says %d' % (name, mine, v))
+    if not bad:
+        print('OK: model constants match SweetHID.cpp (space %dx%d)'
+              % (args.space_w, args.space_h))
+    return not bad
 
 
 if __name__ == '__main__':
