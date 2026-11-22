@@ -148,7 +148,13 @@ def build(seed=None, product_path=None, qemu=False):
         timebase, vtimer_intid = QEMU_TIMEBASE, QEMU_VTIMER_INTID
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
-    seed = seed if seed is not None else os.urandom(64)
+    # A random seed is what the real device has, but a random one here would make
+    # every build byte-different, so two images from the same kernel could never
+    # be compared. Derive it from the identity instead: unique per board, and
+    # identical on every rebuild, which is what makes "did my change alter the
+    # image?" answerable with a sha256.
+    seed = seed if seed is not None else hashlib.sha384(
+        ('ugg-adt-seed/' + TARGET + '/' + MODEL).encode()).digest()[:64]
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
 

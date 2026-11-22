@@ -288,6 +288,22 @@ patch-report: applied=86 skipped=4      ← 4 个是外来补丁，我们的 008
 
 `UGG INPUT` 在符号表里，说明触摸驱动确实编进去了。
 
+### 9.0 顺带修好的：镜像现在可复现
+
+清理 `build/img`（291 MB → 17 MB）后我重打了一次镜像，**sha256 变了**。
+查出来是 `mkadt_ugg.py` 里这行：
+
+```python
+seed = seed if seed is not None else os.urandom(64)      # 每次构建都不一样
+```
+
+它进 `chosen/random-seed`，于是同一内核打两次就是两个不同镜像 ——
+这让"我的改动到底有没有影响镜像"这个问题**无法用 sha256 回答**。
+改成从板型标识派生（`sha384('ugg-adt-seed/' + TARGET + '/' + MODEL)`）：
+每块板子唯一，但每次构建相同。
+
+现在连打两次得到同一个 `dac6290c…ec58`，可复现。
+
 ### 9.1 本轮自己踩的坑（写下来省下一次）
 
 写了个「数括号」的自检脚本，第一版**不区分 `#if` 分支**，
