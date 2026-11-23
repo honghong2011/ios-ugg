@@ -88,10 +88,28 @@ copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
 
 # Shared cache where dyld looks at ignition level 1: hard links, no extra space.
 dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
-sudo mkdir -p "$work/root/System/Library/Caches/com.apple.dyld"
+cachedst="$work/root/System/Library/Caches/com.apple.dyld"
+sudo mkdir -p "$cachedst"
+# Fail loudly when the source is missing or empty.
+#
+# Without this, a missing cryptex cache meant the glob did not expand, ln was
+# handed a literal "/*" path and failed, the loop ended, and the build carried on
+# reporting success -- shipping an image whose dyld shared cache was EMPTY.
+# libSystem exists only inside that cache, so launchd would exec and then die
+# unable to resolve its imports, with every build check green.
+if [ -z "$(ls -A "$work/root/$dsc" 2>/dev/null)" ]; then
+	echo "ERROR: no dyld shared cache under $dsc" >&2
+	echo "       The image would have an empty cache; libSystem lives only there," >&2
+	echo "       so launchd could not run. Check the cryptex extraction step." >&2
+	exit 1
+fi
 for f in "$work/root/$dsc"/*; do
-	sudo ln "$f" "$work/root/System/Library/Caches/com.apple.dyld/${f##*/}"
+	sudo ln "$f" "$cachedst/${f##*/}" || {
+		echo "ERROR: could not hard-link $f into the shared cache" >&2
+		exit 1
+	}
 done
+echo "shared cache: $(ls -1 "$cachedst" | wc -l) file(s), $(du -sm "$cachedst" | cut -f1) MiB"
 
 # dyld does not search the cryptexes at ignition level 1: hard-link every
 # cryptex file that has no counterpart in the OS root (libobjc-trampolines,
