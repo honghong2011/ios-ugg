@@ -87,7 +87,31 @@ copy "$work/sysos/root" "$work/root/private/preboot/Cryptexes/OS"
 copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
 
 # Shared cache where dyld looks at ignition level 1: hard links, no extra space.
-dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
+# Where iOS 16 actually keeps the cache is not obvious, and we had it wrong:
+#   machokit documents  /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/
+#   we linked from      private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
+# and what came out was a 384 KiB file with a "dyld" magic, not "dyld_v1".
+#
+# So search both, preferring whichever actually holds a dyld_v1 cache. The probe
+# below prints what each location contains, which is the fact this build has been
+# missing.
+dsc=
+for cand in \
+    private/preboot/Cryptexes/OS/System/Library/dyld \
+    private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld; do
+	if [ -n "$(ls -A "$work/root/$cand" 2>/dev/null)" ]; then
+		for f in "$work/root/$cand"/*; do
+			[ -f "$f" ] || continue
+			m=$(dd if="$f" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
+			case "$m" in
+				*d*y*l*d*_*v*1*) dsc=$cand; echo "dyld cache found in $cand ($(basename "$f"))"; break ;;
+			esac
+		done
+	fi
+	[ -n "$dsc" ] && break
+done
+# Fall back to the historical path so the existing error messages still fire.
+[ -n "$dsc" ] || dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
 cachedst="$work/root/System/Library/Caches/com.apple.dyld"
 sudo mkdir -p "$cachedst"
 # Fail loudly when the source is missing or empty.
@@ -112,6 +136,25 @@ done
 cache_files=$(ls -1 "$cachedst" | wc -l)
 cache_mib=$(du -sm "$cachedst" | cut -f1)
 echo "shared cache: ${cache_files} file(s), ${cache_mib} MiB"
+# iOS 16 may keep the cache under System/Library/dyld/ rather than
+# Caches/com.apple.dyld/ (machokit documents the former for iOS 16). We link from
+# the latter, and the result was a 384 KiB file with a "dyld" magic instead of
+# "dyld_v1" -- so report BOTH locations and let the log say which holds the real one.
+for probe in \
+    "private/preboot/Cryptexes/OS/System/Library/dyld" \
+    "System/Library/dyld" \
+    "private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld" \
+    "System/Library/Caches/com.apple.dyld"; do
+	pp="$work/root/$probe"
+	if [ -d "$pp" ]; then
+		pn=$(ls -1 "$pp" 2>/dev/null | wc -l)
+		pm=$(du -sm "$pp" 2>/dev/null | cut -f1)
+		echo "  probe $probe: ${pn} entry(ies), ${pm} MiB"
+		ls -1 "$pp" 2>/dev/null | head -5 | sed "s/^/    /"
+	else
+		echo "  probe $probe: absent"
+	fi
+done
 # A real iOS 16 arm64 cache is ~1 GiB and begins "dyld_v1". A 384 KiB file with a
 # 4-byte "dyld" magic is a stub, and libSystem lives only inside the cache -- so
 # every Mach-O in the image, launchd included, would fail to resolve imports.
