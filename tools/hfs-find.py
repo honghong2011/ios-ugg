@@ -114,6 +114,11 @@ def main():
     leaves = []
     stack = [bt.root_node]
     guard = 0
+    # Counters so a failed descent says WHERE it stopped instead of just reporting
+    # zero leaves. Two rounds were spent guessing why a real catalog yielded none.
+    seen_kinds = {}
+    skipped_roff = 0
+    accepted_children = 0
     while stack and guard < bt.total_nodes:
         idx = stack.pop()
         guard += 1
@@ -121,6 +126,7 @@ def main():
         if len(node) < 14:
             continue
         kind = node[8]
+        seen_kinds[kind] = seen_kinds.get(kind, 0) + 1
         if kind == 0xff:
             leaves.append(idx)
         elif kind == 0x00:
@@ -148,6 +154,7 @@ def main():
                 # this crashed on a real 8192-byte node while the 4096-byte fixture
                 # never reached that value.
                 if roff < 6 or roff > len(node) - 4:
+                    skipped_roff += 1
                     continue
                 start = len(node) - roff
                 if start + 2 > len(node):
@@ -157,6 +164,11 @@ def main():
                 if child_at < 0 or child_at + 4 > len(node):
                     continue
                 stack.append(be32(node, child_at))
+                accepted_children += 1
+    print('  descent: nodes visited %d, kinds %s'
+          % (guard, {hex(k): v for k, v in sorted(seen_kinds.items())}))
+    print('  descent: children queued %d, records skipped by guard %d, leaves %d'
+          % (accepted_children, skipped_roff, len(leaves)))
     leaves.sort()
 
     path_of = {1: ''}
