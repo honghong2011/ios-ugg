@@ -57,7 +57,7 @@ def leaf_records(node):
         if off + 2 > len(node):
             return
         roff = be16(node, off)
-        if roff == 0 or roff > len(node):
+        if roff < 2 or roff > len(node) - 2:
             continue
         yield len(node) - roff
 
@@ -141,12 +141,20 @@ def main():
                 if toff + 2 > len(node):
                     break
                 roff = be16(node, toff)
-                if roff == 0 or roff > len(node) - 4:
+                # roff is an offset from the END of the node, so the record starts
+                # at len - roff and roff must leave room for a key length AND the
+                # child pointer. A corrupt or edge roff of 1 puts start at len-1,
+                # where even be16() reads past the buffer -- which is exactly how
+                # this crashed on a real 8192-byte node while the 4096-byte fixture
+                # never reached that value.
+                if roff < 6 or roff > len(node) - 4:
                     continue
                 start = len(node) - roff
+                if start + 2 > len(node):
+                    continue
                 keylen = be16(node, start)
                 child_at = start + 2 + keylen
-                if child_at + 4 > len(node):
+                if child_at < 0 or child_at + 4 > len(node):
                     continue
                 stack.append(be32(node, child_at))
     leaves.sort()
