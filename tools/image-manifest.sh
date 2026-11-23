@@ -41,6 +41,7 @@ bad=0
     for f in sbin/launchd usr/lib/dyld bin bin/sh bin/bash bin/dash \
              System/Library/xpc/launchd.plist \
              System/Library/Caches/com.apple.dyld \
+             System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64 \
              private/var private/etc private/preboot; do
         p="$ROOT/$f"
         if [ -e "$p" ]; then
@@ -77,6 +78,24 @@ bad=0
     done
 
     echo "#"
+    # libSystem exists only inside the dyld shared cache, so a missing or truncated
+    # cache means launchd cannot resolve its imports even though /usr/lib/dyld is
+    # present and executable. Size is the signal here: a populated arm64 cache for
+    # iOS 16 is on the order of a GiB, and an empty file would pass any "exists" test.
+    cache="$ROOT/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64"
+    if [ -f "$cache" ]; then
+        csz=$(wc -c < "$cache" 2>/dev/null || echo 0)
+        echo "# dyld shared cache: ${csz} bytes"
+        if [ "$csz" -lt 104857600 ]; then
+            echo "#   ^ WARNING: under 100 MiB. An iOS 16 arm64 cache is ~1 GiB;"
+            echo "#     a small one means libSystem will not resolve and launchd"
+            echo "#     will fail after exec succeeds."
+        fi
+    else
+        echo "# dyld shared cache: ABSENT"
+        echo "#   ^ libSystem lives only in the cache; without it launchd cannot"
+        echo "#     run even though /usr/lib/dyld exists."
+    fi
     echo "# entries under the mount: $(find "$ROOT" -xdev 2>/dev/null | wc -l)"
 } > "$OUT"
 
