@@ -1,5 +1,67 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
+## ★★★★★ 最新（2026-11-23 08:35，第 50 轮）-- **共享缓存的两个缺口：一个假检查，一个真 bug**
+
+### 起点：所有检查都在看容器，没看东西
+
+之前的检查只说：
+
+```
+present  System/Library/Caches/com.apple.dyld  (directory)
+```
+
+而 mido 的记录明确：**`libSystem` 只存在于 dyld 共享缓存里面**。
+缓存要是空的，launchd 能 exec 成功，然后**解析依赖时死掉** —— 而所有检查都是绿的。
+
+### 顺着这条线找到一个**真的构建 bug**
+
+`mkiosroot.sh` 里建硬链接的循环：
+
+```sh
+for f in "$work/root/$dsc"/*; do
+    sudo ln "$f" "$cachedst/${f##*/}"
+done
+```
+
+**源目录不存在或为空时，glob 不展开** → `ln` 拿到带 `*` 的字面路径 → 失败 →
+循环结束 → **但脚本继续跑**。
+
+结果：目标目录建好了、里面是空的、错误滚过去了、**构建报告成功**。
+
+### 修了三处
+
+| 位置 | 改了什么 |
+|---|---|
+| `mkiosroot.sh` | 源目录为空 → **构建失败**；每个 `ln` 失败都中止；打印文件数和大小 |
+| `image-manifest.sh` | 检查缓存**文件本身**；<100 MiB 警告；缺失报 ABSENT |
+| 两个工具 | 属主显示 `id(名称)`，名称解析失败不再像故障 |
+
+缓存检查的两种异常都测过：
+
+```
+1000 bytes -> WARNING: under 100 MiB ... launchd will fail after exec succeeds
+absent     -> libSystem lives only in the cache; launchd cannot run
+```
+
+### 属主 UNKNOWN 是个假警报
+
+CI 输出里 `launchd` 是 `root:root`，而 `launchd.plist` 是 `root:UNKNOWN`。
+同一个卷、同一次运行，不该不一致。
+
+原因：`stat -c %U:%G` 通过**宿主机的 passwd/group** 解析名字，
+**gid 没有映射就打印 UNKNOWN**，文件本身好好的。
+
+现在显示 `544:197121(Administrators:UNKNOWN)` —— **数字永远存在**。
+
+> 这是本项目第 N 次栽在「检查通过了/报警了，但量的不是那个东西」上：
+> 1. `grep -i bad` 匹配到健康输出里的 `BAD NODES : 0`
+> 2. `[ -e ]` 对悬空符号链接说 MISSING
+> 3. **`(directory)` 说缓存存在，但里面是空的**
+> 4. `UNKNOWN` 说属主有问题，其实是名字没映射
+
+**前三个是检查的错；第二个（空缓存循环）还牵出了一个真的构建缺陷。**
+
+---
 ## ★★★★★ 最新（2026-11-23 07:55，第 62 轮）-- **把上一轮加的能力真正接上：验证 + 文档**
 
 ### 1. 上一轮改了工作流，但从没验证过它能不能跑
