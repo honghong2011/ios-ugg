@@ -63,7 +63,8 @@ for f in sbin/launchd usr/lib/dyld bin bin/sh bin/bash \
             # pass silently -- the exact silent failure this check exists to catch.
             # Decide from the numeric mode, and treat unknown as unknown, not as fine.
             mode=$(stat -c '%a' "$ROOT/$f" 2>/dev/null || echo '')
-            owner=$(stat -c '%U:%G' "$ROOT/$f" 2>/dev/null || echo '?')
+            # ids first: names come from the host's group file and can be unmapped.
+            owner=$(stat -c '%u:%g(%U:%G)' "$ROOT/$f" 2>/dev/null || echo '?')
             # Is this entry supposed to be executable? A plist at 644 is CORRECT, and
             # printing 'NOT-EXEC' next to it is noise that trains the reader to ignore
             # the column -- which is how a real NOT-EXEC gets missed.

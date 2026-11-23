@@ -48,7 +48,10 @@ bad=0
             if [ -f "$p" ]; then
                 sz=$(wc -c < "$p" 2>/dev/null || echo "?")
                 md=$(stat -c "%a" "$p" 2>/dev/null || echo "?")
-                ow=$(stat -c "%U:%G" "$p" 2>/dev/null || echo "?")
+                # Numeric ids alongside the names: stat resolves names through the
+                # HOST's passwd/group file, so an unmapped gid prints UNKNOWN and
+                # looks like a fault when the file is fine. The number always exists.
+                ow=$(stat -c "%u:%g(%U:%G)" "$p" 2>/dev/null || echo "?")
                 mg=$(dd if="$p" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d " \n")
                 printf "present  %-44s %10s bytes  mode %-5s %-14s magic %s\n" \
                     "$f" "$sz" "$md" "$ow" "$mg"
