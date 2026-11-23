@@ -89,12 +89,17 @@ for f in sbin/launchd usr/lib/dyld bin bin/sh bin/bash \
         echo "  MISSING  $f"
         case "$f" in
             sbin/launchd|usr/lib/dyld) missing=1 ;;
-            bin/sh)
-                # Not fatal for exec'ing launchd, but launchd runs daemons through
-                # /bin/sh, and a silent MISSING line is how that goes unnoticed for
-                # several rounds.
-                echo "           ^ NOTE: launchd runs daemons via /bin/sh;"
-                echo "             without it every shell job fails later."
+            bin/sh|bin/bash|bin/dash)
+                # iOS removed bash at iOS 11, and on iOS launchd starts Mach-O
+                # binaries from ProgramArguments -- not shell scripts. A missing
+                # /bin/sh is therefore a property of iOS, not a defect, and it does
+                # not stop launchd from running.
+                #
+                # This used to warn that "launchd runs daemons via /bin/sh", a
+                # desktop-OS assumption that is wrong here. A warning that is wrong
+                # trains the reader to ignore the warnings that are right.
+                echo "           note: absent, as expected on iOS (launchd starts"
+                echo "                 Mach-O binaries, not shell scripts)."
                 ;;
         esac
     fi
