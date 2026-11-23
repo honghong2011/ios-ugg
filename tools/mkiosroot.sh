@@ -109,7 +109,31 @@ for f in "$work/root/$dsc"/*; do
 		exit 1
 	}
 done
-echo "shared cache: $(ls -1 "$cachedst" | wc -l) file(s), $(du -sm "$cachedst" | cut -f1) MiB"
+cache_files=$(ls -1 "$cachedst" | wc -l)
+cache_mib=$(du -sm "$cachedst" | cut -f1)
+echo "shared cache: ${cache_files} file(s), ${cache_mib} MiB"
+# A real iOS 16 arm64 cache is ~1 GiB and begins "dyld_v1". A 384 KiB file with a
+# 4-byte "dyld" magic is a stub, and libSystem lives only inside the cache -- so
+# every Mach-O in the image, launchd included, would fail to resolve imports.
+# Failing here saves a 20-minute build and a flash.
+cache_main="$cachedst/dyld_shared_cache_arm64"
+if [ -f "$cache_main" ]; then
+	cmagic=$(dd if="$cache_main" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
+	case "$cmagic" in
+		*d*y*l*d*_*v*1*) : ;;
+		*)
+			echo "ERROR: dyld_shared_cache_arm64 magic is ${cmagic} -- not dyld_v1." >&2
+			echo "       Size is $(wc -c < "$cache_main") bytes. This is a stub, not a cache." >&2
+			echo "       libSystem exists only inside the cache, so no Mach-O can run." >&2
+			echo "       Check that the SYSTEMOS crypdex was extracted completely." >&2
+			exit 1
+			;;
+	esac
+	if [ "$cache_mib" -lt 100 ]; then
+		echo "ERROR: dyld shared cache is only ${cache_mib} MiB; expect ~1000." >&2
+		exit 1
+	fi
+fi
 
 # dyld does not search the cryptexes at ignition level 1: hard-link every
 # cryptex file that has no counterpart in the OS root (libobjc-trampolines,
