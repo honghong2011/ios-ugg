@@ -56,12 +56,12 @@ BS, NODE, VOL_BLOCKS = 4096, 4096, 2048
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mini-hfs.img')
 OUT = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_OUT
 
-def mknode(kind, numrec, records):
-    n = bytearray(NODE); n[8] = kind
+def mknode(kind, numrec, records, node_size=NODE):
+    n = bytearray(node_size); n[8] = kind
     struct.pack_into('>H', n, 10, numrec)
     for i, (roff, rec) in enumerate(records):
         struct.pack_into('>H', n, 14 + i * 2, roff)
-        n[NODE - roff:NODE - roff + len(rec)] = rec
+        n[node_size - roff:node_size - roff + len(rec)] = rec
     return bytes(n)
 
 def ck(parent, name):
@@ -81,8 +81,18 @@ def fil(cnid, size, blk, cnt):
     struct.pack_into('>II', r, 104, blk, cnt)
     return bytes(r)
 
-def build(path, two_level):
-    """Write a fixture. two_level adds an INDEX root pointing at two leaves."""
+def build(path, mode):
+    """Write a fixture. mode is "flat", "two" or "edge8k".
+
+    "flat"   root node IS the leaf, so only the leaf path runs.
+    "two"    INDEX root pointing at two leaves, so the descent runs.
+    "edge8k" 8192-byte nodes and an index record whose offset is 1, putting its
+             start at node_size-1. That is the shape that crashed on a real
+             catalog: a key length was read one byte past the end of the node.
+             No 4096-byte fixture can produce that offset, which is why a
+             passing fixture said nothing about it.
+    """
+    node_size = 8192 if mode == "edge8k" else NODE
     vol = bytearray(VOL_BLOCKS * BS)
     vh = bytearray(512); vh[0:2] = b'H+'
     struct.pack_into('>I', vh, 40, BS)
@@ -90,51 +100,62 @@ def build(path, two_level):
     b1 = ck(1, 'sbin') + folder(16)
     b2 = ck(16, 'launchd') + fil(17, 64, 20, 1)
 
-    if two_level:
+    if mode in ("two", "edge8k"):
         # header, index(root), leaf, leaf
-        struct.pack_into('>Q', vh, 272, 4 * NODE)
-        struct.pack_into('>II', vh, 288, 10, 4)
+        # The catalog fork covers four nodes at their real spacing: one block per
+        # node when node_size == block size, two when nodes are 8192 on 4k blocks.
+        blocks_per_node = node_size // BS
+        struct.pack_into('>Q', vh, 272, 4 * node_size)
+        struct.pack_into('>II', vh, 288, 10, 4 * blocks_per_node)
         vol[1024:1536] = vh
-        hdr = bytearray(NODE); hdr[8] = 1
+        hdr = bytearray(node_size); hdr[8] = 1
         struct.pack_into('>H', hdr, 14, 2)          # treeDepth
         struct.pack_into('>I', hdr, 16, 1)          # rootNode
         struct.pack_into('>I', hdr, 24, 2)          # firstLeaf
         struct.pack_into('>I', hdr, 28, 3)          # lastLeaf
-        struct.pack_into('>H', hdr, 32, NODE)
+        struct.pack_into('>H', hdr, 32, node_size)
         struct.pack_into('>I', hdr, 36, 4)          # totalNodes
 
-        leaf_sbin = mknode(0xff, 1, [(len(b1), b1)])
+        leaf_sbin = mknode(0xff, 1, [(len(b1), b1)], node_size)
         # Each index record is key + uint32 child node, which is what the fixed
         # descent reads. The buggy version read the offset table instead.
         ia = ck(1, 'sbin') + struct.pack('>I', 2)
         ib = ck(16, 'launchd') + struct.pack('>I', 3)
         # The launchd record needs the file data; put it in the leaf instead.
-        leaf_launchd = mknode(0xff, 1, [(len(b2), b2)])
+        leaf_launchd = mknode(0xff, 1, [(len(b2), b2)], node_size)
         o = 0; offs = []
         for b in (ia, ib):
             o += len(b); offs.append(o)
-        index = mknode(0x00, 2, list(zip(offs, (ia, ib))))
+        if mode == "edge8k":
+            # roff = 1 -> start = node_size - 1: the crash shape. The real catalog
+            # produced such an offset and the key-length read went one byte past the
+            # node. No 4096-byte fixture can generate it.
+            index = mknode(0x00, 3, list(zip(offs + [1], (ia, ib, b""))), node_size)
+        else:
+            index = mknode(0x00, 2, list(zip(offs, (ia, ib))), node_size)
 
-        vol[10 * BS:11 * BS] = hdr
-        vol[11 * BS:12 * BS] = index
-        vol[12 * BS:13 * BS] = leaf_sbin
-        vol[13 * BS:14 * BS] = leaf_launchd
+        # A node may span several blocks (8192-byte nodes on a 4096-byte block
+        # volume span two), so place them by byte offset rather than by block index.
+        vol[10 * BS:10 * BS + node_size] = hdr
+        vol[(10 + blocks_per_node) * BS:(10 + blocks_per_node) * BS + node_size] = index
+        vol[(10 + 2 * blocks_per_node) * BS:(10 + 2 * blocks_per_node) * BS + node_size] = leaf_sbin
+        vol[(10 + 3 * blocks_per_node) * BS:(10 + 3 * blocks_per_node) * BS + node_size] = leaf_launchd
     else:
-        struct.pack_into('>Q', vh, 272, 3 * NODE)
+        struct.pack_into('>Q', vh, 272, 3 * node_size)
         struct.pack_into('>II', vh, 288, 10, 3)
         vol[1024:1536] = vh
-        hdr = bytearray(NODE); hdr[8] = 1
+        hdr = bytearray(node_size); hdr[8] = 1
         struct.pack_into('>H', hdr, 14, 1)
         struct.pack_into('>I', hdr, 16, 1)
         struct.pack_into('>I', hdr, 24, 1)
         struct.pack_into('>I', hdr, 28, 1)
-        struct.pack_into('>H', hdr, 32, NODE)
+        struct.pack_into('>H', hdr, 32, node_size)
         struct.pack_into('>I', hdr, 36, 3)
         roff, offs = 0, []
         for b in (b1, b2):
             roff += len(b); offs.append(roff)
         vol[10 * BS:11 * BS] = hdr
-        vol[11 * BS:12 * BS] = mknode(0xff, 2, list(zip(offs, (b1, b2))))
+        vol[11 * BS:12 * BS] = mknode(0xff, 2, list(zip(offs, (b1, b2))), node_size)
 
     vol[20 * BS:20 * BS + 8] = b'\xcf\xfa\xed\xfe\x0c\x00\x00\x01'
     open(path, 'wb').write(bytes(vol))
@@ -148,11 +169,15 @@ def main():
     else:
         outdir = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(outdir, exist_ok=True)
-    for name, two in (('fx1level.img', False), ('fx2level.img', True)):
+    for name, mode in (('fx1level.img', 'flat'),
+                       ('fx2level.img', 'two'),
+                       ('fx8kedge.img', 'edge8k')):
         path = os.path.join(outdir, name)
-        n = build(path, two)
-        print('%s  %d bytes  (%s)' % (path, n,
-                                      'index root + 2 leaves' if two else 'single leaf'))
+        n = build(path, mode)
+        label = {'flat': 'single leaf',
+                 'two': 'index root + 2 leaves',
+                 'edge8k': '8192-byte nodes, out-of-range record offset'}[mode]
+        print('%s  %d bytes  (%s)' % (path, n, label))
 
 
 if __name__ == '__main__':
