@@ -197,6 +197,32 @@ jobs:
             python3 ./tools/hfs-find.py work/ios16-root.img "$p" >> boot-files.txt 2>&1 \
               || echo "::warning title=catalog-lookup::could not resolve $p"
           done
+          # Where the dyld shared cache actually lives. The manifest only sees the
+          # final tree; this records the candidates too, because a 384 KiB stub with
+          # the wrong magic is what the image currently ships and the two locations
+          # look equally plausible from the outside.
+          {
+            echo "--- dyld shared cache candidates"
+            for d in \
+              System/Library/Caches/com.apple.dyld \
+              System/Library/dyld \
+              private/preboot/Cryptexes/OS/System/Library/dyld \
+              private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld; do
+              if [ -d "work/mnt/$d" ]; then
+                n=$(ls -1 "work/mnt/$d" 2>/dev/null | wc -l)
+                m=$(du -sm "work/mnt/$d" 2>/dev/null | cut -f1)
+                echo "  $d: ${n} entry(ies), ${m} MiB"
+                for f in "work/mnt/$d"/*; do
+                  [ -f "$f" ] || continue
+                  sz=$(wc -c < "$f")
+                  mg=$(dd if="$f" bs=1 count=16 2>/dev/null | od -An -tc | tr -d " \n")
+                  echo "    $(basename "$f") ${sz} bytes magic ${mg}"
+                done
+              else
+                echo "  $d: absent"
+              fi
+            done
+          } >> boot-files.txt 2>&1
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
