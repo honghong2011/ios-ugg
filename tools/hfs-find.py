@@ -78,9 +78,40 @@ def key_of(node, start):
 
 
 def data_of(node, start):
-    """Byte offset of the data record that follows the key at start."""
+    """Byte offset of the data record that follows the key at start.
+
+    The key is padded so that the data record starts on an even offset. Omitting that
+    pad -- which this function did -- made every index record read its 4-byte child
+    pointer one byte early, producing a plausible-looking uint32 assembled from the
+    wrong bytes. On a real catalog that queued header and map nodes as children and
+    produced zero leaves:
+
+        descent: nodes visited 7, kinds {0x0: 3, 0x1: 4}
+        descent: children queued 6, records skipped by guard 28, leaves 0
+
+    The invariant is that the total key size -- length field plus key -- is even.
+    hfs-reader applies it for CLASSIC HFS, where the length field is one byte:
+
+        data_off = 1 + key_len + (key_len is even)
+
+    HFS+ uses a TWO-byte length field, so the pad condition inverts:
+
+        pad = 1 when key_len is ODD
+
+    Copying the classic-HFS rule verbatim adds a byte to every even-length key, which
+    is most catalog keys -- it broke all three fixtures immediately, which is how the
+    direction was caught.
+
+    For reference, the misalignment this guards against produced, on a real catalog:
+
+        descent: nodes visited 7, kinds {0x0: 3, 0x1: 4}
+        descent: children queued 6, records skipped by guard 28, leaves 0
+
+    i.e. header and map nodes queued as children.
+    """
     keylen = be16(node, start)
-    return start + 2 + keylen
+    pad = 1 if keylen % 2 == 1 else 0
+    return start + 2 + keylen + pad
 
 
 def main():
@@ -119,6 +150,9 @@ def main():
     seen_kinds = {}
     skipped_roff = 0
     accepted_children = 0
+    root_kind = -1
+    root_records = -1
+    sample_records = []
     while stack and guard < bt.total_nodes:
         idx = stack.pop()
         guard += 1
@@ -127,6 +161,9 @@ def main():
             continue
         kind = node[8]
         seen_kinds[kind] = seen_kinds.get(kind, 0) + 1
+        if idx == bt.root_node:
+            root_kind = kind
+            root_records = be16(node, 10) if len(node) > 11 else 0
         if kind == 0xff:
             leaves.append(idx)
         elif kind == 0x00:
@@ -163,12 +200,24 @@ def main():
                 child_at = start + 2 + keylen
                 if child_at < 0 or child_at + 4 > len(node):
                     continue
-                stack.append(be32(node, child_at))
+                child = be32(node, child_at)
+                if len(sample_records) < 6:
+                    sample_records.append((roff, keylen, child))
+                stack.append(child)
                 accepted_children += 1
     print('  descent: nodes visited %d, kinds %s'
           % (guard, {hex(k): v for k, v in sorted(seen_kinds.items())}))
     print('  descent: children queued %d, records skipped by guard %d, leaves %d'
           % (accepted_children, skipped_roff, len(leaves)))
+    # Four header nodes were visited on a real catalog that has exactly one, so
+    # several queued children resolved to node 0. Print the root and the first
+    # records verbatim: the next run then shows whether root_node itself is wrong,
+    # whether the offsets are misread, or whether the child pointers are near zero.
+    print('  descent root: node %d kind 0x%02x records %d'
+          % (bt.root_node, root_kind, root_records))
+    for (r_off, k_len, child) in sample_records:
+        print('    rec offset(from end) %-6d keylen %-5d child %d'
+              % (r_off, k_len, child))
     leaves.sort()
 
     path_of = {1: ''}
