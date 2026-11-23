@@ -88,12 +88,25 @@ bad=0
     cache="$ROOT/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64"
     if [ -f "$cache" ]; then
         csz=$(wc -c < "$cache" 2>/dev/null || echo 0)
-        echo "# dyld shared cache: ${csz} bytes"
+        # The magic is the stronger signal. A real cache begins "dyld_v1" followed by
+        # the architecture; a 4-byte "dyld" is a stub. Checking size alone would let a
+        # stub through if it were padded.
+        cmagic=$(dd if="$cache" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
+        echo "# dyld shared cache: ${csz} bytes, magic ${cmagic}"
         if [ "$csz" -lt 104857600 ]; then
             echo "#   ^ WARNING: under 100 MiB. An iOS 16 arm64 cache is ~1 GiB;"
             echo "#     a small one means libSystem will not resolve and launchd"
             echo "#     will fail after exec succeeds."
         fi
+        case "$cmagic" in
+            *d*y*l*d*_*v*1*) : ;;
+            *)
+                echo "#   ^ WARNING: magic is not dyld_v1. This is a STUB, not a cache."
+                echo "#     Real: Magic = \"dyld_v1  arm64e\" (ipsw) / \"dyld_v1   arm64\" (mido)."
+                echo "#     libSystem lives only in this file, so nothing that links"
+                echo "#     against it can run -- including launchd."
+                ;;
+        esac
     else
         echo "# dyld shared cache: ABSENT"
         echo "#   ^ libSystem lives only in the cache; without it launchd cannot"
