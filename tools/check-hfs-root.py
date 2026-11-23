@@ -525,6 +525,21 @@ def main():
     print("free blocks   : %d (%.2f GiB)"
           % (freeblocks, freeblocks * blocksize / 2**30))
     print("files/folders : %d / %d" % (filecount, foldercount))
+    # Volume attributes at offset 4. Two bits decide whether a failed boot can
+    # damage the volume: kHFSVolumeJournaledBit (0x100) and
+    # kHFSVolumeUnmountedBit (0x80). mido lost a volume to exactly this
+    # combination: non-journaled HFS plus repeated unclean panics while writing.
+    attrs = be32(vh, 4)
+    journaled = bool(attrs & 0x100)
+    unmounted_clean = bool(attrs & 0x80)
+    print("attributes    : 0x%08x journaled=%s cleanly-unmounted=%s"
+          % (attrs, "yes" if journaled else "NO",
+             "yes" if unmounted_clean else "NO"))
+    if not journaled:
+        print("  NOTE: not journaled. Every boot that mounts read-write and then")
+        print("        panics can leave the volume worse than it started, which is")
+        print("        the failure mido recorded (non-journaled HFS + unclean")
+        print("        panics). Reflashing is the only repair; journaling is the fix.")
 
     if blocksize not in (512, 1024, 2048, 4096, 8192, 16384, 32768):
         print("implausible block size %d -- the volume header is damaged"
