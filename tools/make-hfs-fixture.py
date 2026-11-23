@@ -56,8 +56,8 @@ BS, NODE, VOL_BLOCKS = 4096, 4096, 2048
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mini-hfs.img')
 OUT = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_OUT
 
-def mknode(kind, numrec, records, node_size=NODE):
-    n = bytearray(node_size); n[8] = kind
+def mknode(kind, numrec, records, node_size=NODE, height=0):
+    n = bytearray(node_size); n[8] = kind; n[9] = height
     struct.pack_into('>H', n, 10, numrec)
     for i, (roff, rec) in enumerate(records):
         struct.pack_into('>H', n, 14 + i * 2, roff)
@@ -130,9 +130,9 @@ def build(path, mode):
             # roff = 1 -> start = node_size - 1: the crash shape. The real catalog
             # produced such an offset and the key-length read went one byte past the
             # node. No 4096-byte fixture can generate it.
-            index = mknode(0x00, 3, list(zip(offs + [1], (ia, ib, b""))), node_size)
+            index = mknode(0x00, 3, list(zip(offs + [1], (ia, ib, b""))), node_size, height=1)
         else:
-            index = mknode(0x00, 2, list(zip(offs, (ia, ib))), node_size)
+            index = mknode(0x00, 2, list(zip(offs, (ia, ib))), node_size, height=1)
 
         # A node may span several blocks (8192-byte nodes on a 4096-byte block
         # volume span two), so place them by byte offset rather than by block index.

@@ -153,6 +153,7 @@ def main():
     root_kind = -1
     root_records = -1
     sample_records = []
+    index_detail = []
     while stack and guard < bt.total_nodes:
         idx = stack.pop()
         guard += 1
@@ -179,6 +180,14 @@ def main():
             # 182380 files. The fixture never caught it because its root node WAS the
             # leaf, so this branch never executed.
             num = be16(node, 10) if len(node) > 11 else 0
+            n_ok = 0
+            for i in range(num):
+                _t = 14 + i * 2
+                if _t + 2 <= len(node):
+                    _r = be16(node, _t)
+                    if 6 <= _r <= len(node) - 4:
+                        n_ok += 1
+            index_detail.append((idx, num, n_ok, node[9] if len(node) > 9 else -1))
             for i in range(num):
                 toff = 14 + i * 2
                 if toff + 2 > len(node):
@@ -218,6 +227,12 @@ def main():
     for (r_off, k_len, child) in sample_records:
         print('    rec offset(from end) %-6d keylen %-5d child %d'
               % (r_off, k_len, child))
+    # Per-node detail: numRecords against the number of offsets that survive the
+    # guard. A large numRecords with many rejected offsets means the node is being
+    # read past its used region, which is a different bug from bad child pointers.
+    for (nidx, nrec, ok_rec, hgt) in index_detail[:6]:
+        print('    index node %-6d numRecords %-4d usable %-4d height %d'
+              % (nidx, nrec, ok_rec, hgt))
     leaves.sort()
 
     path_of = {1: ''}
