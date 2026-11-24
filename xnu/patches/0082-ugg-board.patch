@@ -11,7 +11,7 @@ index 6630131..c8e4ba9 100644
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 6b926fe..ec7d2cf 100644
+index 6b926fe..77db8eb 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -117,6 +117,419 @@ static struct {
@@ -537,18 +537,30 @@ index 6b926fe..ec7d2cf 100644
  }
  
  static int
-@@ -413,6 +846,21 @@ sweet_ufs_strategy(buf_t bp)
+@@ -413,6 +846,33 @@ sweet_ufs_strategy(buf_t bp)
  
  	bool rd = buf_flags(bp) & B_READ;
  
 +	/*
 +	 * UGG bring-up: the root mount hangs with nothing on screen, so say where
-+	 * the I/O actually is. Only the first few go to the console; after that the
-+	 * volume is up and the log ring carries the rest.
++	 * the I/O actually is.
 +	 */
 +	{
 +		static unsigned int ugg_io_trace;
-+		if (ugg_io_trace < 12) {
++		/*
++		 * Raise the trace cap from 12 to 400.
++		 *
++		 * The limit of 12 cost a round: the real catalog's bad nodes live in
++		 * ext3, the first twelve I/Os all land in ext0, and the log therefore
++		 * looked like proof that ext3 had never been read. It does not prove
++		 * that -- it proves only that twelve lines were printed. Reasoning from
++		 * "absent from the log" to "did not happen" has now cost this project
++		 * twice, the other time being a "BAD NODES : 0" that grep -i bad matched.
++		 *
++		 * The volume is up by then and the log ring carries the rest, so this
++		 * costs nothing at boot.
++		 */
++		if (ugg_io_trace < 400) {
 +			ugg_io_trace++;
 +			printf("UGG IO %u blk=0x%llx cnt=%u %s secsize=%u\n",
 +			    ugg_io_trace, (uint64_t)buf_blkno(bp), count,
@@ -559,7 +571,7 @@ index 6b926fe..ec7d2cf 100644
  	buf_setresid(bp, count);
  	if (!rd && !su.writable) {
  		error = EROFS;
-@@ -583,6 +1031,328 @@ static const struct cdevsw sweet_ufs_cdevsw = {
+@@ -583,6 +1043,328 @@ static const struct cdevsw sweet_ufs_cdevsw = {
  	.d_type       = D_DISK,
  };
  
@@ -888,7 +900,7 @@ index 6b926fe..ec7d2cf 100644
  static int
  sweet_ufs_init(void)
  {
-@@ -592,9 +1362,16 @@ sweet_ufs_init(void)
+@@ -592,9 +1374,16 @@ sweet_ufs_init(void)
  	char want[64] = "userdata";
  	int error;
  
@@ -905,7 +917,7 @@ index 6b926fe..ec7d2cf 100644
  		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
  		return ENXIO;
  	}
-@@ -606,8 +1383,18 @@ sweet_ufs_init(void)
+@@ -606,8 +1395,18 @@ sweet_ufs_init(void)
  	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
  	su.cache = (cache == 1);
  	su.wait = (wait == 1);
@@ -924,7 +936,7 @@ index 6b926fe..ec7d2cf 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -623,12 +1410,14 @@ sweet_ufs_init(void)
+@@ -623,12 +1422,14 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -939,7 +951,7 @@ index 6b926fe..ec7d2cf 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -651,15 +1440,44 @@ sweet_ufs_init(void)
+@@ -651,15 +1452,44 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -987,7 +999,7 @@ index 6b926fe..ec7d2cf 100644
  	return 0;
  }
  
-@@ -669,7 +1487,7 @@ sweet_ufs_init(void)
+@@ -669,7 +1499,7 @@ sweet_ufs_init(void)
   * console (kernel printf and /dev/console writes of daemons, both through
   * _cnputs) is also kept in a 4 MiB ring, and once the partition is known
   * and writable a thread copies new ring blocks to the LAST 4 MiB + 4 KiB of
@@ -996,7 +1008,7 @@ index 6b926fe..ec7d2cf 100644
   * image at its start. Device block 0 of that area is a header:
   *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
-@@ -678,7 +1496,7 @@ sweet_ufs_init(void)
+@@ -678,7 +1508,7 @@ sweet_ufs_init(void)
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -1005,7 +1017,7 @@ index 6b926fe..ec7d2cf 100644
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
  static uint64_t _Atomic sweet_log_total;
-@@ -736,66 +1554,126 @@ struct sweet_log_header {
+@@ -736,66 +1566,126 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
@@ -1166,7 +1178,7 @@ index 6b926fe..ec7d2cf 100644
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
  	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
  		sweet_log_secs = SWEET_LOG_SECS;
-@@ -805,6 +1683,114 @@ sweet_log_start(void)
+@@ -805,6 +1695,114 @@ sweet_log_start(void)
  	}
  }
  
