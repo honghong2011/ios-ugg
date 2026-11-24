@@ -1283,10 +1283,10 @@ index 6b926fe..ec7d2cf 100644
  
 diff --git a/bsd/dev/ugg_input.c b/bsd/dev/ugg_input.c
 new file mode 100644
-index 0000000..2565862
+index 0000000..d4f1c85
 --- /dev/null
 +++ b/bsd/dev/ugg_input.c
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,581 @@
 +/*
 + * UGG (Redmi Note 5A Prime, MSM8940 / Snapdragon 435) input:
 + * Goodix GT9xx touch on BLSP1 QUP3 I2C, plus power / volume keys.
@@ -1793,7 +1793,24 @@ index 0000000..2565862
 +	 * however the digitiser misbehaves now, the root is already up and the log
 +	 * is already being flushed. ugginput=0 still disables it.
 +	 */
-+	int enabled = 1;
++	/*
++	 * DEFAULT OFF, and that is a correction, not a preference.
++	 *
++	 * The 2026-11-23 boot log stops one line short of "UGG ROOT MOUNTED":
++	 *
++	 *     SWEET STEP: vfs_mountroot: mount ok
++	 *     <nothing>
++	 *
++	 * and this function is the only thing that runs between that step and that
++	 * printf. It printed no UGG INPUT line at all, so it died before its first
++	 * message -- in ml_io_map or the first SPMI read, not in the digitiser driver.
++	 *
++	 * Turning it on by default made a touch experiment indistinguishable from a
++	 * boot failure, which is the mistake this file's header describes three earlier
++	 * rounds making. A touch driver that stops the desktop appearing cannot be
++	 * tested on that desktop.
++	 */
++	int enabled = 0;
 +	thread_t thread;
 +
 +	if (input_started) {
