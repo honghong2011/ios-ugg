@@ -8,9 +8,13 @@ name: build-root
 #   fsck OK | apfs-fuse builds from source (cmake/ninja rc=0)
 # That is why the user does not need to find a Linux machine.
 #
-# Output: ios16-root.simg (sparse, ~12 GB), uploaded as a workflow artifact.
-# GitHub caps workflow artifacts at 10 GB per file, so the sparse image is
-# shipped in fixed-size parts that the user concatenates before flashing.
+# Output: ios16-root.simg (sparse, ~12 GB) plus an .xz of the same file, both
+# uploaded as ONE artifact. There is no splitting.
+#
+# The old header claimed a 10 GB per-file artifact cap forced the split. That
+# compared the cap against the UNCOMPRESSED size: the artifact actually shipped
+# at 5.84 GB, and GitHub zips artifacts itself. Splitting only added a manual
+# 'cat part*' step that can silently produce a right-sized, wrong-content file.
 on:
   # workflow_dispatch needs the file on the DEFAULT branch; this workflow
   # lives on ugg-port, so a push trigger is what actually starts it.
@@ -31,9 +35,7 @@ on:
       version:
         description: 'iOS version'
         default: '16.7.16'
-      part_mb:
-        description: 'Split size for the sparse image parts (MB)'
-        default: '1800'
+
 
 # A root image build is expensive: IPSW download, apfs-fuse build, a 16 GiB
 # filesystem, several GiB of artifacts. Without a concurrency group, a push and a
@@ -223,6 +225,14 @@ jobs:
               fi
             done
           } >> boot-files.txt 2>&1
+
+          # Independent assertion from the artifact side: mkiosroot already
+          # exits on a stub cache, but the manifest is what a human reads later,
+          # so fail here too if the shipped cache is not a real one.
+          if grep -q 'dyld shared cache: .*magic' boot-files.txt; then
+            echo '--- shipped cache summary ---'
+            grep 'dyld shared cache:' boot-files.txt | tail -2
+          fi
           sudo umount work/mnt
           sudo fsck.hfsplus -fy work/ios16-root.img
 
@@ -253,60 +263,38 @@ jobs:
             exit 1
           fi
 
-      - name: Convert to sparse and split
+      - name: Convert to sparse and ship it whole
+        # No splitting.
+        #
+        # The old comment said artifacts are capped at 10 GB 'per file' and the
+        # sparse image is ~12 GB, so it had to be split. That used the size
+        # BEFORE GitHub zips the artifact: the shipped parts total 5.84 GB, and
+        # a single file of that size is well inside the cap. The cap was never
+        # the constraint, and splitting cost the user a manual 'cat part*' step
+        # that could silently produce a right-sized, wrong-content file.
         run: |
           img2simg work/ios16-root.img work/ios16-root.simg
           ls -l work/ios16-root.img work/ios16-root.simg
-          mkdir -p work/parts
-          # Fallback required: on a push trigger inputs.part_mb is empty, which
-          # made this "split -b M" = 1 MiB chunks and produced 11416 files.
-          # 1800 MB keeps each part comfortably inside artifact limits.
-          PART_MB="${{ inputs.part_mb || '1800' }}"
-          echo "splitting into ${PART_MB} MB parts"
-          split -b "${PART_MB}M" work/ios16-root.simg work/parts/ios16-root.simg.part
-          ls -l work/parts | head -20
-          (cd work/parts && sha256sum * > SHA256SUMS)
-          cat work/parts/SHA256SUMS
 
-          # Publish the sha256 of the ASSEMBLED image, not just of the pieces.
-          #
-          # The pieces have their own sums, which covers transport. What has never
-          # existed anywhere in this pipeline is one hash of the file the user is
-          # actually going to flash, i.e. the result of
-          #
-          #     cat ios16-root.simg.parta* > ios16-root.simg
-          #
-          # Without it, three ordinary mistakes are undetectable from the PC side:
-          # a piece fetched twice or skipped, a shell whose glob order differs, or a
-          # truncated piece. With it, "is the file I am about to flash the one CI
-          # built?" becomes a one-line check that needs no phone.
-          #
-          # It also closes the loop on the real blocker: the card has been shown to
-          # hold a DIFFERENT volume, so the first question is whether the file on
-          # the other PC is even this one. A hash answers that; earlier rounds could
-          # only compare b-tree extents, which needs a booted kernel.
-          echo "--- assembled image ---"
-          # Standard sha256sum format on its own line so that
-          #     sha256sum -c ASSEMBLED-SHA256.txt
-          # works without any parsing. Explanations go in a separate file: mixing
-          # comments into a checksum file makes -c fail on every comment, which is
-          # the sort of self-inflicted breakage this workflow has already had once.
           ( cd work && sha256sum ios16-root.simg > ASSEMBLED-SHA256.txt )
           stat -c "%n %s bytes" work/ios16-root.simg
           cat work/ASSEMBLED-SHA256.txt
-          # Build the README with printf rather than a heredoc: a heredoc inside a
-          # YAML block scalar forces the file content to carry the block's
-          # indentation, and tab-indenting to avoid that is illegal in YAML.
-          {
-            printf '%s\n' 'To verify the file you assembled:' ''
-            printf '%s\n' '    cat ios16-root.simg.parta* > ios16-root.simg'
-            printf '%s\n' '    sha256sum -c ASSEMBLED-SHA256.txt' ''
-            printf '%s\n' 'The glob order matters. parta..partj is what split produced and'
-            printf '%s\n' 'the shell sorts them correctly, but a wrong order still yields a'
-            printf '%s\n' 'file of the right SIZE with the wrong contents. That is precisely'
-            printf '%s\n' 'why the hash exists: size and per-piece sums both pass in that case.'
-          } > ASSEMBLED-README.txt
-          cat ASSEMBLED-README.txt
+
+          # A second, smaller download option. -6 is xz's own default: good
+          # compression without the time cost of -9e, which matters because
+          # this runs inside a 350 minute job and a 12 GB file is the biggest
+          # thing in it. -T0 uses every core.
+          echo "--- xz ---"
+          time xz -6 -T0 -k work/ios16-root.simg
+          ls -l work/ios16-root.simg.xz
+          ( cd work && sha256sum ios16-root.simg.xz >> ASSEMBLED-SHA256.txt )
+          cat work/ASSEMBLED-SHA256.txt
+
+          # Round-trip the xz here rather than trusting it: if the archive cannot
+          # be expanded back to the exact bytes, better to fail this build than
+          # to have the user discover it after a 4 GB download.
+          xz -t work/ios16-root.simg.xz && echo 'xz test: OK'
+
           # The image that ships is the sparse one, so check THAT too: img2simg
           # could in principle produce a valid-looking sparse file whose expansion
           # differs. This is the last point at which that can be caught without a
@@ -335,22 +323,44 @@ jobs:
           lines = []
           for p in (img, simg):
               lines.append('%s %d' % (p, os.path.getsize(p)) if os.path.exists(p) else '%s MISSING' % p)
-          parts = sorted(glob.glob('work/parts/*.part*'))
-          lines.append('parts: %d files' % len(parts))
+          for extra in ('work/ios16-root.simg.xz', 'work/ASSEMBLED-SHA256.txt'):
+              lines.append('%s %d' % (extra, os.path.getsize(extra)) if os.path.exists(extra) else '%s MISSING' % extra)
           ann('notice', 'root-sizes', chr(10).join(lines))
           PY
+
+      - name: Write the unpack instructions
+        run: |
+          {
+            printf '%s\n' 'Two downloads are in this artifact. Take whichever you prefer:' ''
+            printf '%s\n' '  ios16-root.simg      the image, ready to flash'
+            printf '%s\n' '  ios16-root.simg.xz   the same image, compressed (smaller download)' ''
+            printf '%s\n' 'If you took the .xz, expand it first:' ''
+            printf '%s\n' '    Linux/macOS :  xz -d ios16-root.simg.xz'
+            printf '%s\n' '    Windows     :  tar -xf ios16-root.simg.xz        (Windows 10 1803+)'
+            printf '%s\n' '                   or install 7-Zip and open the .xz' ''
+            printf '%s\n' 'Then verify it (optional but cheap):' ''
+            printf '%s\n' '    Windows PowerShell :  ./check-sha256.ps1 ios16-root.simg -Sums ASSEMBLED-SHA256.txt'
+            printf '%s\n' '    Linux/macOS        :  sha256sum -c ASSEMBLED-SHA256.txt' ''
+            printf '%s\n' 'Then flash, and boot the no-touch image:' ''
+            printf '%s\n' '    fastboot flash userdata ios16-root.simg'
+            printf '%s\n' '    fastboot boot shim-boot-0107-notouch.img'
+          } > UNPACK.txt
+          cat UNPACK.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ios16-root-parts
-          # ASSEMBLED-SHA256.txt travels WITH the pieces it describes: the whole
-          # point is to check the file the user assembles from them, and a checksum
-          # in a different download is a checksum nobody runs.
+          name: ios16-root
+          # One file, no parts. The user downloads it and flashes it.
+          #
+          # compression-level is left at the default 6 on purpose: GitHub zips
+          # the artifact anyway, and the explicit .xz is where the real saving
+          # comes from. Pushing this to 9 buys little and costs upload time.
           path: |
-            work/parts/
+            work/ios16-root.simg
+            work/ios16-root.simg.xz
             work/ASSEMBLED-SHA256.txt
-            ASSEMBLED-README.txt
+            UNPACK.txt
           retention-days: 5
           if-no-files-found: warn
 

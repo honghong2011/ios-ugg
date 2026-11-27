@@ -86,125 +86,112 @@ copy "$work/os/root" "$work/root"
 copy "$work/sysos/root" "$work/root/private/preboot/Cryptexes/OS"
 copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
 
-# Shared cache where dyld looks at ignition level 1: hard links, no extra space.
-# Where iOS 16 actually keeps the cache is not obvious, and we had it wrong:
-#   machokit documents  /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/
-#   we linked from      private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
-# and what came out was a 384 KiB file with a "dyld" magic, not "dyld_v1".
+# ---------------------------------------------------------------------------
+# dyld shared cache
 #
-# So search both, preferring whichever actually holds a dyld_v1 cache. The probe
-# below prints what each location contains, which is the fact this build has been
-# missing.
-dsc=
-for cand in \
-    private/preboot/Cryptexes/OS/System/Library/dyld \
-    private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld; do
-	if [ -n "$(ls -A "$work/root/$cand" 2>/dev/null)" ]; then
-		for f in "$work/root/$cand"/*; do
-			[ -f "$f" ] || continue
-			m=$(dd if="$f" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
-			case "$m" in
-				*d*y*l*d*_*v*1*) dsc=$cand; echo "dyld cache found in $cand ($(basename "$f"))"; break ;;
-			esac
-		done
-	fi
-	[ -n "$dsc" ] && break
-done
-# Fall back to the historical path so the existing error messages still fire.
-[ -n "$dsc" ] || dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
+# On iOS, libSystem exists ONLY inside dyld_shared_cache_arm64. Without a real
+# cache, launchd can be exec'd and still fail on every import, so no desktop.
+#
+# mido's working image has it as 3.10 GiB across 44 files (the main file plus
+# numbered sub-caches, .dylddata and .symbols). Ours was 384 KiB, one file, with
+# the 4-byte magic 'dyld' instead of 'dyld_v1' -- a stub.
+#
+# Two things were wrong and both are handled here:
+#   1. the source directory was guessed; four candidates are now probed and the
+#      one holding a dyld_v1 file is chosen,
+#   2. the link loop copies every file in that directory, not just one.
+#
+# The probe output is printed in a shape the CI artifact can carry, because this
+# build has never recorded which candidate actually held the cache.
+# ---------------------------------------------------------------------------
 cachedst="$work/root/System/Library/Caches/com.apple.dyld"
 sudo mkdir -p "$cachedst"
-# Fail loudly when the source is missing or empty.
-#
-# Without this, a missing cryptex cache meant the glob did not expand, ln was
-# handed a literal "/*" path and failed, the loop ended, and the build carried on
-# reporting success -- shipping an image whose dyld shared cache was EMPTY.
-# libSystem exists only inside that cache, so launchd would exec and then die
-# unable to resolve its imports, with every build check green.
-if [ -z "$(ls -A "$work/root/$dsc" 2>/dev/null)" ]; then
-	echo "ERROR: no dyld shared cache under $dsc" >&2
-	echo "       The image would have an empty cache; libSystem lives only there," >&2
-	echo "       so launchd could not run. Check the cryptex extraction step." >&2
+
+echo "--- dyld shared cache candidates"
+for cand in \
+    System/Library/dyld \
+    System/Library/Caches/com.apple.dyld \
+    private/preboot/Cryptexes/OS/System/Library/dyld \
+    private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld; do
+	src="$work/root/$cand"
+	if [ -d "$src" ] && [ -n "$(ls -A "$src" 2>/dev/null)" ]; then
+		n=$(ls -1 "$src" 2>/dev/null | wc -l)
+		m=$(du -sm "$src" 2>/dev/null | cut -f1)
+		echo "  $cand: ${n} entry(ies), ${m} MiB"
+		for f in "$src"/*; do
+			[ -f "$f" ] || continue
+			sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+			mg=$(dd if="$f" bs=1 count=16 2>/dev/null | od -An -tc | tr -d " \n")
+			echo "    $(basename "$f") ${sz} bytes magic ${mg}"
+		done
+	else
+		echo "  $cand: absent"
+	fi
+done
+
+# Pick the first candidate that holds a file beginning with dyld_v1.
+dsc=
+for cand in \
+    System/Library/dyld \
+    System/Library/Caches/com.apple.dyld \
+    private/preboot/Cryptexes/OS/System/Library/dyld \
+    private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld; do
+	src="$work/root/$cand"
+	[ -d "$src" ] || continue
+	for f in "$src"/*; do
+		[ -f "$f" ] || continue
+		mg=$(dd if="$f" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
+		case "$mg" in
+			*d*y*l*d*_*v*1*) dsc=$cand; echo "chosen: $cand (found dyld_v1 in $(basename "$f"))"; break ;;
+		esac
+	done
+	[ -n "$dsc" ] && break
+done
+
+if [ -z "$dsc" ]; then
+	echo "ERROR: no dyld_v1 shared cache found in any candidate directory." >&2
+	echo "       libSystem lives only inside that cache, so launchd could exec" >&2
+	echo "       and then fail on every import -- no desktop. The candidate listing" >&2
+	echo "       above shows what each location actually holds." >&2
 	exit 1
 fi
+
+# Link EVERY file: the real cache is a set (main + sub-caches + data + symbols).
+linked=0
 for f in "$work/root/$dsc"/*; do
-	sudo ln "$f" "$cachedst/${f##*/}" || {
+	[ -f "$f" ] || continue
+	if sudo ln -f "$f" "$cachedst/${f##*/}" 2>/dev/null; then
+		linked=$((linked + 1))
+	else
 		echo "ERROR: could not hard-link $f into the shared cache" >&2
 		exit 1
-	}
-done
-cache_files=$(ls -1 "$cachedst" | wc -l)
-cache_mib=$(du -sm "$cachedst" | cut -f1)
-echo "shared cache: ${cache_files} file(s), ${cache_mib} MiB"
-# iOS 16 may keep the cache under System/Library/dyld/ rather than
-# Caches/com.apple.dyld/ (machokit documents the former for iOS 16). We link from
-# the latter, and the result was a 384 KiB file with a "dyld" magic instead of
-# "dyld_v1" -- so report BOTH locations and let the log say which holds the real one.
-for probe in \
-    "private/preboot/Cryptexes/OS/System/Library/dyld" \
-    "System/Library/dyld" \
-    "private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld" \
-    "System/Library/Caches/com.apple.dyld"; do
-	pp="$work/root/$probe"
-	if [ -d "$pp" ]; then
-		pn=$(ls -1 "$pp" 2>/dev/null | wc -l)
-		pm=$(du -sm "$pp" 2>/dev/null | cut -f1)
-		echo "  probe $probe: ${pn} entry(ies), ${pm} MiB"
-		ls -1 "$pp" 2>/dev/null | head -5 | sed "s/^/    /"
-	else
-		echo "  probe $probe: absent"
 	fi
 done
-# A real iOS 16 arm64 cache is ~1 GiB and begins "dyld_v1". A 384 KiB file with a
-# 4-byte "dyld" magic is a stub, and libSystem lives only inside the cache -- so
-# every Mach-O in the image, launchd included, would fail to resolve imports.
-# Failing here saves a 20-minute build and a flash.
-cache_main="$cachedst/dyld_shared_cache_arm64"
-if [ -f "$cache_main" ]; then
-	cmagic=$(dd if="$cache_main" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
-	case "$cmagic" in
-		*d*y*l*d*_*v*1*) : ;;
-		*)
-			echo "ERROR: dyld_shared_cache_arm64 magic is ${cmagic} -- not dyld_v1." >&2
-			echo "       Size is $(wc -c < "$cache_main") bytes. This is a stub, not a cache." >&2
-			echo "       libSystem exists only inside the cache, so no Mach-O can run." >&2
-			echo "       Check that the SYSTEMOS crypdex was extracted completely." >&2
-			exit 1
-			;;
-	esac
-	if [ "$cache_mib" -lt 100 ]; then
-		echo "ERROR: dyld shared cache is only ${cache_mib} MiB; expect ~1000." >&2
-		exit 1
-	fi
+
+# Verify by content, not by counting: a stub can be one file too.
+main_cache="$cachedst/dyld_shared_cache_arm64"
+if [ ! -f "$main_cache" ]; then
+	echo "ERROR: dyld_shared_cache_arm64 did not land in the cache directory." >&2
+	exit 1
 fi
+cache_bytes=$(wc -c < "$main_cache")
+cache_mib=$((cache_bytes / 1048576))
+cache_magic=$(dd if="$main_cache" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
+echo "shared cache: ${linked} file(s), main file ${cache_bytes} bytes (${cache_mib} MiB), magic ${cache_magic}"
 
-# dyld does not search the cryptexes at ignition level 1: hard-link every
-# cryptex file that has no counterpart in the OS root (libobjc-trampolines,
-# libffi-trampolines, libstdc++, ...) to its root path.
-for c in OS App; do
-	(cd "$work/root/private/preboot/Cryptexes/$c" && sudo find . ! -type d ! -path './System/Library/Caches/com.apple.dyld/*') |
-	while IFS= read -r f; do
-		f=${f#./}
-		if ! sudo test -e "$work/root/$f" && ! sudo test -L "$work/root/$f"; then
-			sudo mkdir -p "$work/root/$(dirname "$f")"
-			src="$work/root/private/preboot/Cryptexes/$c/$f"
-			# Linux hfsplus cannot hard-link symlinks: copy those.
-			if sudo test -L "$src"; then sudo cp -P "$src" "$work/root/$f"; else sudo ln "$src" "$work/root/$f"; fi
-			echo "linked $c:/$f"
-		fi
-	done
-done
-
-# logd's log stores, normally made at restore: it checks owner _logd (272)
-# and mode, plus a .migrated marker, else asks a helper and crashes
-# ("BUG IN LIBTRACE: Failed to migrate directory").
-db="$work/root/private/var/db"
-sudo install -d -o 272 -g 272 -m 0751 "$db/diagnostics"
-sudo install -d -o 272 -g 272 -m 0755 "$db/uuidtext" "$db/diagnostics/timesync"
-for d in diagnostics uuidtext diagnostics/timesync; do
-	sudo install -o 272 -g 272 -m 0644 /dev/null "$db/$d/.migrated"
-done
-
+case "$cache_magic" in
+	*d*y*l*d*_*v*1*) : ;;
+	*)
+		echo "ERROR: dyld_shared_cache_arm64 magic is '${cache_magic}', not dyld_v1." >&2
+		echo "       That is a stub, not a cache. libSystem would not resolve." >&2
+		exit 1
+		;;
+esac
+if [ "$cache_mib" -lt 100 ]; then
+	echo "ERROR: the shared cache is only ${cache_mib} MiB; a real one is ~1000." >&2
+	echo "       Check the candidate listing above for the directory that holds it." >&2
+	exit 1
+fi
 # System keybag for the built-in AppleKeyStore (no passcode).
 sudo install -d -m 0700 -o 0 -g 0 "$work/root/private/var/keybags"
 printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
