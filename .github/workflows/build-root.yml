@@ -347,20 +347,34 @@ jobs:
           } > UNPACK.txt
           cat UNPACK.txt
 
+      # TWO artifacts on purpose, because a GitHub artifact is an atomic zip.
+      #
+      # The first version of this step put both files in one artifact, so the
+      # user could 'pick the smaller one' -- except downloading an artifact
+      # fetches everything in it, 9.66 GiB, which is more than the .xz alone.
+      # Splitting means the small download is actually small.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ios16-root
-          # One file, no parts. The user downloads it and flashes it.
-          #
-          # compression-level is left at the default 6 on purpose: GitHub zips
-          # the artifact anyway, and the explicit .xz is where the real saving
-          # comes from. Pushing this to 9 buys little and costs upload time.
+          name: ios16-root-xz
+          # ~5 GB instead of ~12 GB. This is the one to download.
+          # .xz is already compressed, so zipping it again gains nothing;
+          # level 0 stops the runner spending minutes to prove that.
+          compression-level: 0
           path: |
-            work/ios16-root.simg
             work/ios16-root.simg.xz
             work/ASSEMBLED-SHA256.txt
             UNPACK.txt
+          retention-days: 5
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios16-root-raw
+          # The uncompressed image, for anyone who cannot expand .xz. Only
+          # fetched when explicitly chosen.
+          path: work/ios16-root.simg
           retention-days: 5
           if-no-files-found: warn
 
