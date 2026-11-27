@@ -169,15 +169,22 @@ for f in "$work/root/$dsc"/*; do
 done
 
 # Verify by content, not by counting: a stub can be one file too.
+# Verify by content AND total size.
+#
+# The size must be measured over the WHOLE directory, not the main file: this
+# iOS splits the cache into 44 pieces, and dyld_shared_cache_arm64 is only a
+# 384 KiB header. A first attempt checked that file alone, saw 0 MiB, and
+# failed the build on an image whose cache was in fact complete at 3.10 GiB --
+# the same 44 files and the same total mido recorded on its working phone.
 main_cache="$cachedst/dyld_shared_cache_arm64"
 if [ ! -f "$main_cache" ]; then
 	echo "ERROR: dyld_shared_cache_arm64 did not land in the cache directory." >&2
 	exit 1
 fi
-cache_bytes=$(wc -c < "$main_cache")
-cache_mib=$((cache_bytes / 1048576))
 cache_magic=$(dd if="$main_cache" bs=1 count=7 2>/dev/null | od -An -tc | tr -d " \n")
-echo "shared cache: ${linked} file(s), main file ${cache_bytes} bytes (${cache_mib} MiB), magic ${cache_magic}"
+cache_bytes=$(find "$cachedst" -type f -printf "%s\n" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+cache_mib=$((cache_bytes / 1048576))
+echo "shared cache: ${linked} file(s), ${cache_bytes} bytes total (${cache_mib} MiB), main-file magic ${cache_magic}"
 
 case "$cache_magic" in
 	*d*y*l*d*_*v*1*) : ;;
@@ -187,18 +194,14 @@ case "$cache_magic" in
 		exit 1
 		;;
 esac
-if [ "$cache_mib" -lt 100 ]; then
-	echo "ERROR: the shared cache is only ${cache_mib} MiB; a real one is ~1000." >&2
-	echo "       Check the candidate listing above for the directory that holds it." >&2
+# 1 GiB, not 100 MiB: the real total is ~3.1 GiB in 44 files, and the header
+# file alone is under half a MiB. Anything under a gigabyte means the pieces
+# did not come across.
+if [ "$cache_mib" -lt 1024 ]; then
+	echo "ERROR: the whole shared cache is only ${cache_mib} MiB; a real one is ~3100." >&2
+	echo "       It should be 44 files totalling about 3.1 GiB. Check the listing above." >&2
 	exit 1
 fi
-# System keybag for the built-in AppleKeyStore (no passcode).
-sudo install -d -m 0700 -o 0 -g 0 "$work/root/private/var/keybags"
-printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
-	'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-	'<plist version="1.0"><dict><key>KeyBagKeys</key><data>U1dFRVQ=</data></dict></plist>' |
-	sudo install -m 0600 -o 0 -g 0 /dev/stdin "$work/root/private/var/keybags/systembag.kb"
-
 df -h "$work/root"
 sudo umount "$work/root"
 # Linux hfsplus decomposes some non-ASCII names (localized Shortcuts examples)
