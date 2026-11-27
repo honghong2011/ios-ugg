@@ -1,6 +1,62 @@
 # iOS 16 on ugg (Redmi Note 5A, MSM8937) — working notes
 
-## ★★★★★ 最新（2026-11-27 20:05，第 60 轮）-- **107 走通了启动；errno 5 的根因量化了：卡上卷比镜像旧 12 块**
+## ★★★★★ 最新（2026-11-27 21:30，第 61 轮）-- **缓存确实在，是我的校验量错了文件**
+
+### 构建失败给的答案（比成功更有价值）
+
+`46002787626` 在第 10 步失败：
+
+```
+ERROR: the shared cache is only 0 MiB; a real one is ~1000.
+shared cache: 44 file(s), main file 393216 bytes (0 MiB), magic dyld_v1
+```
+
+但同一份日志的前面，探测打印了**真实内容**：
+
+| 项 | 值 |
+|---|---|
+| 真实路径 | **`private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld`**（不是我猜的 `System/Library/dyld`）|
+| 文件数 | **44** |
+| 魔数 | 全部 `dyld_v1` |
+| 合计 | **3,329,294,336 bytes = 3.10 GiB** |
+
+**3.10 GiB / 44 个文件 —— 和 mido 记录的完全一致。**
+
+### 我错在哪
+
+`dyld_shared_cache_arm64` 在这个布局里**只是 393216 字节的头部**，
+真正的大块全在子文件里：
+
+```
+dyld_shared_cache_arm64.symbols          592 MB
+dyld_shared_cache_arm64.42.dyldlinkedit  333 MB
+dyld_shared_cache_arm64.27.dylddata      187 MB
+dyld_shared_cache_arm64.01 .. .42        每个 0.4-115 MB
+```
+
+我只量了主文件 → 384 KiB → 0 MiB → **把一个好镜像判死**。
+
+### 修法
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 大小来源 | 主文件 | **整个目录 `find -printf` 求和** |
+| 门槛 | 100 MiB | **1 GiB**（真实 3.1 GiB，留余量）|
+| 魔数 | 主文件 | 主文件（不变，确实 `dyld_v1`）|
+
+用真实布局造的测试数据（45 文件 / 3832 MiB / `dyld_v1`）→ **通过并全链**；
+只有桩 → **拒绝**。
+
+### 教训
+
+这是「量错了东西」的第 N 次，但这次它**帮了忙**：
+因为校验太严，构建失败，我才拿到了那份探测输出 ——
+否则会产出一个 5.8 GB 的镜像让我下载、刷机、再花一轮查。
+
+**严格校验的价值不在通过时，而在拦下时能说出原因。**
+
+---
+## （2026-11-27 20:05，第 60 轮）-- **107 走通了启动；errno 5 的根因量化了：卡上卷比镜像旧 12 块**
 
 ### 107 的两个突破
 
