@@ -22,6 +22,7 @@ Usage
     python verify-card.py ios16-root.simg --chunk-mb 64
     python verify-card.py ios16-root.simg --start-mb 4096      # resume a scan
     python verify-card.py ios16-root.simg --map                 # region report only
+    python verify-card.py ios16-root.simg --at-gib 6.6          # just one window (seconds)
 
 Exit status: 0 the whole compared range matches, 1 a divergence was found.
 """
@@ -200,11 +201,14 @@ def main():
     chunk_mb = 64
     start_mb = 0
     want_map = "--map" in sys.argv
+    at_gib = None
     for i, a in enumerate(sys.argv):
         if a == "--chunk-mb" and i + 1 < len(sys.argv):
             chunk_mb = int(sys.argv[i + 1])
         if a == "--start-mb" and i + 1 < len(sys.argv):
             start_mb = int(sys.argv[i + 1])
+        if a == "--at-gib" and i + 1 < len(sys.argv):
+            at_gib = float(sys.argv[i + 1])
 
     if not args:
         print(__doc__)
@@ -221,6 +225,32 @@ def main():
         return 2
 
     img = open_image(img_path)
+
+    # Targeted mode: compare one window instead of the whole volume. The phone's
+    # errno 5 points at a specific catalogue block, so streaming 12 GB just to learn
+    # whether that block reached the card wastes both time and traffic.
+    if at_gib is not None:
+        center = int(at_gib * 2 ** 30)
+        win = 1 << 20
+        off = max(0, center - win // 2) // BLOCK * BLOCK
+        n = win
+        print("image   : %s" % img_path)
+        print("window  : %.6f GiB (offset %d, %d bytes)" % (at_gib, off, n))
+        want = img.read(off, n)
+        got = read_card(off, n)
+        if len(got) < len(want):
+            print("!! short read: got %d of %d bytes" % (len(got), len(want)))
+            return 1
+        if got == want:
+            print("MATCH: the card holds exactly what the image has here.")
+            print("       The flash is correct at this offset, so the fault is in how")
+            print("       the phone reads, not in what was written.")
+            return 0
+        print("DIFFERS: the card does NOT hold the image's bytes here.")
+        print()
+        show(off, want, got)
+        return 1
+
     chunk = chunk_mb << 20
     total = img.size
     print("image   : %s" % img_path)
