@@ -21,3 +21,20 @@
   persist and the backups intact, and confirm every destructive step with the
   user before running it.
 - Keep device dumps, serial numbers and downloaded Apple artifacts out of git.
+
+## Commit identity (do not override it)
+
+Commits must carry the repository owner's identity, which is already set in the
+user's global gitconfig:
+
+```
+user.name  = honghong2011
+user.email = 1770945672@qq.com
+```
+
+**Never pass `-c user.name=... -c user.email=...` on the command line.** That is
+how 127 commits ended up attributed to `lead <lead@local>`, an identity the user
+does not recognise on GitHub. Just run `git commit`; the config is already right.
+
+If a commit somehow has the wrong identity, do not rewrite published history to
+fix it -- say so and let the user decide.
