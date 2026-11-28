@@ -365,6 +365,10 @@ jobs:
             work/ios16-root.simg.xz
             work/ASSEMBLED-SHA256.txt
             UNPACK.txt
+            # Ship the verifier with the thing it verifies. UNPACK.txt told the
+            # user to run ./check-sha256.ps1, but the file was never included,
+            # so the instruction pointed at nothing on their machine.
+            tools/check-sha256.ps1
           retention-days: 5
           if-no-files-found: warn
 
