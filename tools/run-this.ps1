@@ -14,7 +14,10 @@ $br = New-Object System.IO.BinaryReader($fs)
 $magic = $br.ReadUInt32()
 Write-Host ("file   : {0}" -f $Image)
 Write-Host ("magic  : 0x{0:X8}" -f $magic)
-if ($magic -ne 0xED26FF3A) { Write-Host "NOT a sparse image"; $fs.Close(); exit 1 }
+# 0xED26FF3A as a PowerShell literal is Int32 (-316218726); ReadUInt32 returns
+# UInt32 (3978755898). Comparing them is always false, which is how the first
+# version reported 'NOT a sparse image' for a perfectly valid file.
+if ($magic -ne [uint32]3978755898) { Write-Host "NOT a sparse image"; $fs.Close(); exit 1 }
 
 $major=$br.ReadUInt16(); $minor=$br.ReadUInt16()
 $fhsz =$br.ReadUInt16(); $chsz =$br.ReadUInt16()
