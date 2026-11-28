@@ -1,85 +1,143 @@
-# run-this.ps1 -- one command to answer: is the block the phone complains about
-# actually present in the sparse image we flashed, or does fastboot skip it?
+# run-this.ps1 -- does fastboot actually write the blocks the phone complains about?
 #
-#   powershell -ExecutionPolicy Bypass -File run-this.ps1 E:\ios-ugg\img\work\ios16-root.simg
+# Reads the Android sparse chunk table and reports, for the 4K block where this
+# image's catalog extent 3 lives, whether that block is covered by RAW data (so it
+# gets written) or by DONT_CARE/FILL (which fastboot skips or fills with zeros).
+#
+#   powershell -ExecutionPolicy Bypass -File run-this.ps1 ..\work\ios16-root.simg
+#
+# The whole file is walked strictly sequentially through one BinaryReader. An
+# earlier version mixed $fs.Position with $br.ReadUInt16(), and because a
+# BinaryReader buffers, every chunk after the first was read from the wrong place:
+# it reported 27642 chunks covering a single block.
 
-param([Parameter(Mandatory=$true, Position=0)][string]$Image)
+param(
+    [Parameter(Mandatory=$true, Position=0)][string]$Image,
+    [int]$ProbeBlock4K = 1729287
+)
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $Image)) { Write-Host "no such file: $Image"; exit 2 }
 
+$size = (Get-Item -LiteralPath $Image).Length
 $fs = [System.IO.File]::OpenRead($Image)
 $br = New-Object System.IO.BinaryReader($fs)
 
+# 0xED26FF3A as a PowerShell literal is Int32 (negative); ReadUInt32 gives UInt32.
+$SPARSE_MAGIC = [uint32]3978755898
 $magic = $br.ReadUInt32()
-Write-Host ("file   : {0}" -f $Image)
+Write-Host ("file   : {0} ({1:N0} bytes)" -f $Image, $size)
 Write-Host ("magic  : 0x{0:X8}" -f $magic)
-# 0xED26FF3A as a PowerShell literal is Int32 (-316218726); ReadUInt32 returns
-# UInt32 (3978755898). Comparing them is always false, which is how the first
-# version reported 'NOT a sparse image' for a perfectly valid file.
-if ($magic -ne [uint32]3978755898) { Write-Host "NOT a sparse image"; $fs.Close(); exit 1 }
+if ($magic -ne $SPARSE_MAGIC) { Write-Host "NOT a sparse image"; $br.Dispose(); $fs.Dispose(); exit 1 }
 
-$major=$br.ReadUInt16(); $minor=$br.ReadUInt16()
-$fhsz =$br.ReadUInt16(); $chsz =$br.ReadUInt16()
-$blkSz=$br.ReadUInt32(); $totalBlks=$br.ReadUInt32()
-$totalChunks=$br.ReadUInt32(); $csum=$br.ReadUInt32()
+$major       = $br.ReadUInt16()
+$minor       = $br.ReadUInt16()
+$fhsz        = $br.ReadUInt16()
+$chsz        = $br.ReadUInt16()
+$blkSz       = $br.ReadUInt32()
+$totalBlks   = $br.ReadUInt32()
+$totalChunks = $br.ReadUInt32()
+$csum        = $br.ReadUInt32()
 
 Write-Host ("block  : {0} bytes" -f $blkSz)
-Write-Host ("blocks : {0} ({1:N2} GiB expanded)" -f $totalBlks, ($totalBlks*$blkSz/1GB))
-Write-Host ("chunks : {0}" -f $totalChunks)
-Write-Host ""
+Write-Host ("blocks : {0:N0} ({1:N2} GiB expanded)" -f $totalBlks, ($totalBlks * $blkSz / 1GB))
+Write-Host ("chunks : {0:N0}" -f $totalChunks)
 
-$counts = @{ 0xCAC1=0; 0xCAC2=0; 0xCAC3=0; 0xCAC4=0 }
-$dontCareBlocks = 0
+# Skip the rest of the header (should be none for fhsz=28).
+if ($fhsz -gt 28) { [void]$br.ReadBytes($fhsz - 28) }
+
+$RAW = 0xCAC1; $FILL = 0xCAC2; $DONTCARE = 0xCAC3; $CRC = 0xCAC4
+
+$rawBlks = [int64]0; $fillBlks = [int64]0; $dcBlks = [int64]0; $crcCnt = [int64]0
 $runs = New-Object System.Collections.ArrayList
-
-$fs.Position = $fhsz
 $cur = [int64]0
-for ($i = 0; $i -lt $totalChunks; $i++) {
-    $base = $fs.Position
-    $ct = $br.ReadUInt16(); $res = $br.ReadUInt16()
-    $csz = $br.ReadUInt32(); $tsz = $br.ReadUInt32()
-    $dblks = [int64]($tsz / $blkSz)
-    if ($counts.ContainsKey([int]$ct)) { $counts[[int]$ct] += $dblks }
-    if ($ct -eq 0xCAC3) {
-        $dontCareBlocks += $dblks
-        [void]$runs.Add([pscustomobject]@{ Start=$cur; Len=$dblks; End=$cur+$dblks })
-    }
-    $cur += $dblks
-    $fs.Position = $base + $csz
-}
-$fs.Close()
+$probeChunk = -1; $probeKind = 'not covered'
 
+for ($i = 0; $i -lt $totalChunks; $i++) {
+    if (($i % 5000) -eq 0 -and $i -gt 0) { Write-Host ("  ... chunk {0:N0}" -f $i) }
+
+    $ct  = $br.ReadUInt16()
+    $res = $br.ReadUInt16()
+    $csz = $br.ReadUInt32()      # chunk total size in bytes, header included
+    $tsz = $br.ReadUInt32()      # payload size in BYTES
+    $dataBytes = [int64]($csz - $chsz)
+
+    switch ($ct) {
+        $RAW {
+            $blocks = [int64]($tsz / $blkSz)
+            $rawBlks += $blocks
+            if ($probeChunk -lt 0 -and $cur -le $ProbeBlock4K -and $ProbeBlock4K -lt ($cur + $blocks)) {
+                $probeChunk = $i; $probeKind = 'RAW (written)'
+            }
+            $cur += $blocks
+        }
+        $FILL {
+            $blocks = [int64]($tsz / $blkSz)
+            $fillBlks += $blocks
+            if ($probeChunk -lt 0 -and $cur -le $ProbeBlock4K -and $ProbeBlock4K -lt ($cur + $blocks)) {
+                $probeChunk = $i; $probeKind = 'FILL (constant bytes)'
+            }
+            $cur += $blocks
+        }
+        $DONTCARE {
+            $blocks = [int64]($tsz / $blkSz)
+            $dcBlks += $blocks
+            [void]$runs.Add([pscustomobject]@{ Start = $cur; Len = $blocks; End = $cur + $blocks })
+            if ($probeChunk -lt 0 -and $cur -le $ProbeBlock4K -and $ProbeBlock4K -lt ($cur + $blocks)) {
+                $probeChunk = $i; $probeKind = 'DONT_CARE (fastboot SKIPS this)'
+            }
+            $cur += $blocks
+        }
+        $CRC {
+            $crcCnt++
+        }
+        default {
+            Write-Host ("  unknown chunk type 0x{0:X4} at #{1}" -f $ct, $i) -ForegroundColor Yellow
+        }
+    }
+
+    if ($dataBytes -gt 0) { [void]$br.ReadBytes([int]$dataBytes) }
+}
+
+$br.Dispose(); $fs.Dispose()
+
+Write-Host ""
 Write-Host "chunk summary:"
-Write-Host ("  RAW       {0,10:N0} blocks = {1,8:N1} MiB" -f $counts[0xCAC1], ($counts[0xCAC1]*$blkSz/1MB))
-Write-Host ("  FILL      {0,10:N0} blocks = {1,8:N1} MiB" -f $counts[0xCAC2], ($counts[0xCAC2]*$blkSz/1MB))
-Write-Host ("  DONT_CARE {0,10:N0} blocks = {1,8:N1} MiB" -f $counts[0xCAC3], ($counts[0xCAC3]*$blkSz/1MB))
+Write-Host ("  RAW       {0,12:N0} blocks = {1,10:N1} MiB" -f $rawBlks,  ($rawBlks  * $blkSz / 1MB))
+Write-Host ("  FILL      {0,12:N0} blocks = {1,10:N1} MiB" -f $fillBlks, ($fillBlks * $blkSz / 1MB))
+Write-Host ("  DONT_CARE {0,12:N0} blocks = {1,10:N1} MiB" -f $dcBlks,   ($dcBlks   * $blkSz / 1MB))
+Write-Host ("  CRC32     {0,12:N0}" -f $crcCnt)
+Write-Host ("  covered   {0,12:N0} blocks  (header says {1:N0})" -f $cur, $totalBlks)
 Write-Host ""
 
-# The phone's catalogue extent 3 sits at 4K block 1729287 (byte 7,083,159,552).
-$probeBytes = [int64]1729287 * 4096
-$probeBlk   = [int64]($probeBytes / $blkSz)
-Write-Host ("catalog ext3 starts at 4K block 1729287 = byte {0:N0} = sparse block {1:N0}" -f $probeBytes, $probeBlk)
+if ($cur -ne $totalBlks) {
+    Write-Host "WARNING: chunk table covers a different number of blocks than the header claims." -ForegroundColor Yellow
+}
 
-$hit = $runs | Where-Object { $probeBlk -ge $_.Start -and $probeBlk -lt $_.End }
-if ($hit) {
+Write-Host ("probe: 4K block {0:N0} (byte {1:N0})" -f $ProbeBlock4K, ([int64]$ProbeBlock4K * 4096))
+if ($probeChunk -ge 0) {
+    Write-Host ("  -> chunk #{0}: {1}" -f $probeChunk, $probeKind)
+    if ($probeKind -like 'DONT_CARE*') {
+        Write-Host ""
+        Write-Host "*** fastboot SKIPS this region: the card keeps whatever was there before. ***" -ForegroundColor Red
+        Write-Host "    That is why the phone reads garbage where the image has a good node."
+        Write-Host "    FIX: flash the raw .img instead, or erase the partition first."
+        exit 1
+    } else {
+        Write-Host ""
+        Write-Host "This block IS written by fastboot, so the DONT_CARE theory is dead." -ForegroundColor Green
+    }
+} else {
+    Write-Host "  -> not covered by any chunk"
+}
+
+if ($runs.Count -gt 0) {
     Write-Host ""
-    Write-Host "*** THAT BLOCK IS INSIDE A DONT_CARE RUN ***" -ForegroundColor Red
-    Write-Host ("    run covers sparse blocks {0:N0}..{1:N0} ({2:N1} MiB)" -f $hit.Start, ($hit.End-1), ($hit.Len*$blkSz/1MB))
-    Write-Host "    fastboot SKIPS DONT_CARE, so this part of the card keeps old data."
-    Write-Host "    That is why the phone reads garbage where the image has a good node."
-    Write-Host ""
-    Write-Host "    FIX: flash as raw, or erase the partition first."
+    Write-Host ("{0} DONT_CARE run(s); largest 10:" -f $runs.Count)
+    $runs | Sort-Object Len -Descending | Select-Object -First 10 | ForEach-Object {
+        Write-Host ("  4K blocks {0,10:N0} .. {1,10:N0}  = {2,9:N1} MiB" -f $_.Start, ($_.End - 1), ($_.Len * $blkSz / 1MB))
+    }
 } else {
     Write-Host ""
-    Write-Host "That block is NOT in a DONT_CARE run -- so it was written." -ForegroundColor Green
-    Write-Host "The DONT_CARE theory is dead; the fault is elsewhere."
-}
-
-Write-Host ""
-if ($runs.Count -gt 0) {
-    Write-Host ("{0} DONT_CARE run(s); largest 8:" -f $runs.Count)
-    $runs | Sort-Object Len -Descending | Select-Object -First 8 | ForEach-Object {
-        Write-Host ("  sparse blocks {0,10:N0} .. {1,10:N0}  = {2,8:N1} MiB" -f $_.Start, ($_.End-1), ($_.Len*$blkSz/1MB))
-    }
+    Write-Host "No DONT_CARE chunks at all -- every block is written." -ForegroundColor Green
 }
