@@ -52,6 +52,7 @@ def main():
     print("total blocks: %d (%.2f GiB expanded)" % (total_blks, total_blks * blk / 2**30))
     print("chunks      : %d" % total_chunks)
 
+    conv_seen = set()
     f.seek(fhsz)
     kinds = {}
     spans = []
@@ -64,14 +65,45 @@ def main():
             bad = (i, pos, "file ended mid-header (%d of 12 bytes)" % len(raw), None)
             break
         ct, res, csz, tsz = struct.unpack("<HHII", raw)
-        if csz < 12:
-            bad = (i, pos, "chunk_sz %d is below the 12-byte header" % csz, raw)
+        # Which field holds what is not as standard as it looks.
+        #
+        # AOSP libsparse defines chunk_sz as the byte size of header+payload, and
+        # total_sz the same. The image under investigation instead has chunk_sz as a
+        # BLOCK count and total_sz as the byte size: its first chunk reads
+        #   c1 ca | 00 00 | 01 00 00 00 | 0c 10 00 00
+        # i.e. RAW, chunk_sz=1, total_sz=4108 = 12 + 4096. Reading chunk_sz as bytes
+        # then gives 1, which is below the 12-byte header and aborted the walk.
+        #
+        # Decide per file: if chunk_sz*blk + hdr == total_sz, chunk_sz is a block
+        # count; otherwise treat it as a byte size as documented.
+        # Payload-bearing types settle the convention: a block-count file shows
+        # chunk_sz*blk + 12 == total_sz. DONT_CARE carries no payload, so it cannot
+        # be used for the test -- there total_sz is just 12 and chunk_sz is the count.
+        # DONT_CARE and FILL carry little or no payload, so the arithmetic test
+        # that works for RAW does not apply to them. Their chunk_sz is simply the
+        # block count under the block-count convention, and 12 under the byte-size
+        # one (both types have a 12-byte header and at most a 4-byte fill value).
+        if ct == RAW:
+            blocks_is_count = (csz * blk + chsz == tsz)
+        else:
+            # FILL: total_sz is 12 or 16 bytes; DONT_CARE: always 12.
+            blocks_is_count = (tsz <= chsz + 4)
+
+        conv_seen.add(blocks_is_count)
+        if blocks_is_count:
+            nblk = csz
+            csz = tsz if tsz >= chsz else chsz
+        else:
+            nblk = tsz // blk
+        # csz now means BYTES for every chunk type (fixed up above when the file
+        # used a block count instead).
+        if csz < chsz:
+            bad = (i, pos, "chunk size %d is below the %d-byte header" % (csz, chsz), raw)
             break
         if pos + csz > fsize:
-            bad = (i, pos, "chunk_sz %d runs past end of file (%d bytes left)"
-                   % (csz, fsize - pos), raw)
+            bad = (i, pos, "chunk runs past end of file (%d bytes left, needs %d)"
+                   % (fsize - pos, csz), raw)
             break
-        nblk = tsz // blk
         if show_chunks and i < show_chunks:
             print("  chunk %-6d %-10s csz=%-10d tsz=%-10d -> %d blocks, starts at %d"
                   % (i, NAMES.get(ct, hex(ct)), csz, tsz, nblk, cur))
@@ -81,6 +113,7 @@ def main():
         if csz > 12:
             f.seek(pos + csz)
     f.close()
+    print("chunk_sz field: %s" % ("BLOCK count" if True in conv_seen and False not in conv_seen else "byte size" if False in conv_seen else "no chunks"))
 
     if bad:
         i, pos, why, raw = bad
