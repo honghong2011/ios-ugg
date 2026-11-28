@@ -173,9 +173,55 @@ def main():
             res = "DIFFERS (%d/%d bytes)" % (diff, len(want))
         print("  %-10.4f %-12d %s" % (g, b, res))
 
+    # A percentage is not a verdict. Say what the card actually holds, and when it
+    # holds something that belongs to the image but at another offset, name the
+    # offset -- that is the difference between "not flashed" and "flashed shifted".
     print()
-    print("MATCH = the card holds the image there. ALL ZERO = never written.")
-    print("The last MATCH before the first ALL ZERO is the end of what got flashed.")
+    print("  %-10s %-12s %s" % ("at GiB", "block", "what the card holds"))
+    print("  " + "-" * 62)
+    verdicts = []
+    for g, b in zip(points, blocks):
+        off = b * BLOCK
+        card = got.get(b)
+        if card is None:
+            v = "READ FAILED"
+        else:
+            ident = img.read(off, len(card))
+            if card == ident:
+                v = "identical to image"
+            elif card == b"\x00" * len(card):
+                v = "ALL ZERO (never written)"
+            else:
+                probe = card[:512]
+                shift = None
+                for d in range(-64, 65):
+                    if d == 0:
+                        continue
+                    o2 = off + d * BLOCK
+                    if 0 <= o2 and o2 + len(probe) <= img.size and img.read(o2, len(probe)) == probe:
+                        shift = d
+                        break
+                if shift is not None:
+                    v = "image content found %+d blocks away" % shift
+                else:
+                    v = "unrelated data"
+        verdicts.append((g, b, v))
+        print("  %-10.4f %-12d %s" % (g, b, v))
+
+    print()
+    kinds = [v for _, _, v in verdicts]
+    if all(k == "identical to image" for k in kinds):
+        print("VERDICT: the card matches the image everywhere probed.")
+        print("         The flash is correct; the fault is in how the phone reads.")
+    elif any(k.startswith("ALL ZERO") for k in kinds):
+        print("VERDICT: parts of the card are zero where the image has data.")
+        print("         Those regions were never written.")
+    elif any("blocks away" in k for k in kinds):
+        print("VERDICT: the card holds image data at the WRONG OFFSET.")
+        print("         The flash was shifted, not truncated.")
+    else:
+        print("VERDICT: the card holds data that is not the image.")
+        print("         This is the previous volume, not a partial write.")
     return 0
 
 
